@@ -97,6 +97,33 @@ test('a question opens a modal child window drawn like the app, and answers with
   expect(await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id)!.isEnabled(), mainId)).toBe(true);
 });
 
+// macOS: Electron disables a window by hanging a half-clear sheet over it, and on macOS 27
+// the question above it can't be answered. The test build plays the Mac here.
+test('the macOS way: the window behind stays enabled, and focusing it hands the focus back', async () => {
+  await app.evaluate(() => ((globalThis as { __bulwarkMacDialogs?: boolean }).__bulwarkMacDialogs = true));
+  try {
+    await ask({ ...QUESTION, id: 'mac' });
+    const dialog = await dialogPage();
+    const [shown] = await dialogWindows();
+    expect(shown.modal).toBe(false);
+    const mainId = shown.parent!;
+    expect(await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id)!.isEnabled(), mainId)).toBe(true);
+    const focusedIsDialog = () =>
+      app.evaluate(({ BrowserWindow }) => Boolean(BrowserWindow.getFocusedWindow()?.webContents.getURL().startsWith('data:')));
+    await expect.poll(focusedIsDialog).toBe(true);
+    await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id)!.focus(), mainId);
+    await expect.poll(focusedIsDialog).toBe(true);
+    await dialog.getByRole('button', { name: 'Empty trash' }).click();
+    expect(await answer('mac')).toEqual({ button: 1 });
+    await expect.poll(async () => (await dialogWindows()).length).toBe(0);
+    // Let go: the window behind keeps the focus now.
+    await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.fromId(id)!.focus(), mainId);
+    await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getFocusedWindow()?.id ?? null)).toBe(mainId);
+  } finally {
+    await app.evaluate(() => ((globalThis as { __bulwarkMacDialogs?: boolean }).__bulwarkMacDialogs = false));
+  }
+});
+
 test('Escape closes it without an answer; Enter takes the default button', async () => {
   await ask({ ...QUESTION, id: 'esc' });
   let dialog = await dialogPage();

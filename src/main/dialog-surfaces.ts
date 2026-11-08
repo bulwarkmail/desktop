@@ -14,10 +14,11 @@
  * only. It can't navigate. Only the page that owns it may size it: the window that
  * opened it, or for a dialog opened from a dialog, the page that opened the first one.
  *
- * macOS: `modal` would make a sheet, so there the parent is disabled by hand.
+ * macOS: `modal` would make a sheet, so there the parent is held by hand (parent-hold.ts).
  */
 
 import { BrowserWindow, type BrowserWindowConstructorOptions, type WebContents, type WebPreferences } from 'electron';
+import { holdParent, parentHeldByHand } from './parent-hold';
 
 export const DIALOG_FRAME_NAME = /^bulwark-dialog-[a-z0-9-]{1,60}$/;
 
@@ -43,7 +44,7 @@ export function dialogSurfaceOptions(opener: WebContents, preferences: WebPrefer
   const area = parent.getContentBounds();
   return {
     parent,
-    modal: process.platform !== 'darwin',
+    modal: !parentHeldByHand(),
     show: false,
     frame: false,
     transparent: true,
@@ -98,12 +99,11 @@ export function adoptDialogSurface(child: BrowserWindow, opener: WebContents, na
   // about:blank and nothing else: the page writes into it, nobody loads anything.
   child.webContents.on('will-navigate', (event) => event.preventDefault());
   child.webContents.on('will-redirect', (event) => event.preventDefault());
-  const mac = process.platform === 'darwin';
-  if (mac) parent.setEnabled(false);
+  const release = parentHeldByHand() ? holdParent(parent, child) : null;
   child.once('closed', () => {
     surfaces.delete(id);
+    release?.();
     if (parent.isDestroyed()) return;
-    if (mac) parent.setEnabled(true);
     // The focus goes back to the window behind, and the page puts it on the opener.
     parent.focus();
   });

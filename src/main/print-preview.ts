@@ -36,6 +36,7 @@ import { fileURLToPath } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, screen, session as electronSession, type IpcMainEvent, type IpcMainInvokeEvent, type Session, type WebContents } from 'electron';
 import { CHANNEL, type PrintPreviewOutcome } from '../shared/bridge';
 import { readLook, type DialogLook } from './dialog-window-rules';
+import { holdParent, parentHeldByHand } from './parent-hold';
 import { pdfFileName } from './menu-text';
 import { showMessageBox } from './message-box';
 import { native } from './native';
@@ -142,6 +143,8 @@ interface Preview {
   settled: boolean;
   /** Printing or saving: the window is going, the source stays until it's done. */
   running: boolean;
+  /** macOS: lets go of the parent kept behind the preview (parent-hold.ts). */
+  release: (() => void) | null;
 }
 
 interface Popup {
@@ -392,11 +395,11 @@ export class PrintPreviews {
     const theme = request.theme ?? this.lastTheme ?? { dark: shell.dark, colours: { ...(shell.background ? { background: shell.background } : {}), ...(shell.foreground ? { foreground: shell.foreground } : {}) } };
 
     return new Promise<PrintPreviewOutcome>((resolve) => {
-      const mac = process.platform === 'darwin';
+      const byHand = parentHeldByHand();
       const display = screen.getDisplayMatching(parent.getBounds());
       const window = new BrowserWindow({
         parent,
-        modal: !mac,
+        modal: !byHand,
         show: false,
         frame: false,
         transparent: true,
@@ -441,6 +444,7 @@ export class PrintPreviews {
         resolve,
         settled: false,
         running: false,
+        release: null,
       };
       const contentsId = window.webContents.id;
       this.previews.set(contentsId, preview);
@@ -449,14 +453,14 @@ export class PrintPreviews {
       window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       window.on('closed', () => {
         this.previews.delete(contentsId);
-        if (mac && !parent.isDestroyed()) parent.setEnabled(true);
+        preview.release?.();
         if (!preview.running) this.settle(preview, 'cancelled');
       });
       // The page the source belongs to went: nothing left to print.
       const gone = () => this.close(preview, 'cancelled');
       source.contents.once('destroyed', gone);
       parent.once('closed', gone);
-      if (mac) parent.setEnabled(false);
+      if (byHand) preview.release = holdParent(parent, window);
       void window.loadURL(printPageUrl());
     });
   }
@@ -656,8 +660,8 @@ export class PrintPreviews {
   }
 
   private refocus(preview: Preview): void {
+    preview.release?.();
     if (preview.parent.isDestroyed()) return;
-    if (process.platform === 'darwin') preview.parent.setEnabled(true);
     preview.parent.focus();
   }
 

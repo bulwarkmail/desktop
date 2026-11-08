@@ -15,7 +15,7 @@
  * waits. A page that navigates away, or a window that closes, cancels its dialogs.
  *
  * macOS: `modal` would make it a sheet sliding out of the title bar, so there the parent
- * is disabled by hand instead.
+ * is held by hand instead (parent-hold.ts).
  */
 
 import { readFileSync } from 'node:fs';
@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { BrowserWindow, ipcMain, screen, session as electronSession, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from 'electron';
 import { CHANNEL, type DialogWindowAnswer } from '../shared/bridge';
 import { DIALOG_CARD_WIDTH, DIALOG_SHADOW_MARGIN, dialogBounds, dialogZoom, readDialogAnswer, readDialogRequest, type DialogSpec } from './dialog-window-rules';
+import { holdParent, parentHeldByHand } from './parent-hold';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DIALOG_PRELOAD = path.join(HERE, 'dialog-preload.cjs');
@@ -42,6 +43,8 @@ interface Entry {
   parent: BrowserWindow | null;
   resolve: (answer: DialogWindowAnswer) => void;
   window?: BrowserWindow;
+  /** Lets go of the parent holdParent kept behind the question. */
+  release?: () => void;
   settled: boolean;
 }
 
@@ -193,9 +196,9 @@ export class DialogWindows {
     const zoom = entry.sender && !entry.sender.isDestroyed() ? dialogZoom(entry.sender.getZoomFactor()) : 1;
     entry.spec = { ...entry.spec, zoom };
     const workArea = (parent ? screen.getDisplayMatching(parent.getBounds()) : screen.getDisplayNearestPoint(screen.getCursorScreenPoint())).workArea;
-    const mac = process.platform === 'darwin';
+    const byHand = parentHeldByHand();
     const window = new BrowserWindow({
-      ...(parent ? { parent, modal: !mac } : {}),
+      ...(parent ? { parent, modal: !byHand } : {}),
       show: false,
       frame: false,
       transparent: true,
@@ -234,7 +237,7 @@ export class DialogWindows {
       this.shown.delete(contentsId);
       this.settle(entry, null);
     });
-    if (mac && parent) parent.setEnabled(false);
+    if (byHand && parent) entry.release = holdParent(parent, window);
     void window.loadURL(dialogPageUrl());
   }
 
@@ -266,7 +269,7 @@ export class DialogWindows {
     const { window, parent } = entry;
     if (window) {
       for (const [id, shown] of this.shown) if (shown === entry) this.shown.delete(id);
-      if (process.platform === 'darwin' && parent && !parent.isDestroyed()) parent.setEnabled(true);
+      entry.release?.();
       if (!window.isDestroyed()) window.destroy();
       // The focus goes back to the window behind, where it was before.
       if (parent && !parent.isDestroyed()) {
