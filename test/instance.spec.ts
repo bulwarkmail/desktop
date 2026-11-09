@@ -46,7 +46,7 @@ test('the bridge is there on the instance, but without the standalone parts', as
   expect(await bridgeType()).toBe('object');
   const keys = await page.evaluate(() => Object.keys((window as unknown as { bulwarkDesktop: object }).bulwarkDesktop).sort());
   // `keystore` is only there where the native helper loaded: the next test.
-  expect(keys.filter((key) => key !== 'keystore')).toEqual(['appLock', 'auth', 'certificates', 'clipboard', 'dialogs', 'edit', 'lifecycle', 'localImport', 'menu', 'mode', 'os', 'platform', 'policy', 'privacy', 'shell', 'spellcheck', 'theme', 'updates', 'version', 'windows']);
+  expect(keys.filter((key) => key !== 'keystore')).toEqual(['appLock', 'auth', 'certificates', 'clipboard', 'devTools', 'dialogs', 'edit', 'files', 'httpCache', 'lifecycle', 'localImport', 'menu', 'mode', 'os', 'platform', 'policy', 'print', 'privacy', 'recentFiles', 'saveAs', 'shell', 'spellcheck', 'theme', 'updates', 'version', 'windows']);
 });
 
 test.describe('the OS keystore on an instance', () => {
