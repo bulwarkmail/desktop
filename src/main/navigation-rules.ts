@@ -26,6 +26,25 @@ export function isSsoStart(url: URL, origin: string): boolean {
   return false;
 }
 
+/**
+ * A plugin's sign-in path on the instance: the webmail's locale and its base path may stand in
+ * front (main knows the instance's origin, not its path). The webmail vouches for the rest.
+ */
+const PLUGIN_CALLBACK_PATH = /^(?:\/[^/]+)*\/plugins\/oauth\/callback\/?$/;
+
+/**
+ * A plugin's OAuth request, as the webmail hands it over: an https page elsewhere whose one
+ * `redirect_uri` is the instance's own plugin callback. Only the bridge call opens it in the
+ * app; a link with the same address still goes to the system browser.
+ */
+export function isPluginSignIn(url: URL, origin: string): boolean {
+  if (url.protocol !== 'https:' || url.origin === origin || url.username || url.password) return false;
+  const redirects = url.searchParams.getAll('redirect_uri');
+  if (redirects.length !== 1) return false;
+  const target = parse(redirects[0]);
+  return !!target && target.origin === origin && PLUGIN_CALLBACK_PATH.test(target.pathname);
+}
+
 /** How long a single sign-in may stay away from the origin, when a policy forces it. */
 export const FORCED_SSO_LIMIT_MS = 10 * 60_000;
 

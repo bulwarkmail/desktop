@@ -5,10 +5,12 @@
  * exceptions are the ones the webmail depends on: about:blank and blob: pop-ups
  * for print and previews (print calls document.write on the pop-up), and in
  * instance mode the SSO redirect chain, which has to run in the window so the
- * instance's own cookies come back with it.
+ * instance's own cookies come back with it. A plugin's sign-in, which the webmail
+ * asks for through the bridge, runs in a window of its own on the same session for the
+ * same reason (openSignInWindow).
  */
 
-import { screen, shell, type BrowserWindow, type BrowserWindowConstructorOptions, type WebContents, type WebPreferences } from 'electron';
+import { BrowserWindow, screen, shell, type BrowserWindowConstructorOptions, type WebContents, type WebPreferences } from 'electron';
 import type { Mode } from '../shared/bridge';
 import { FORCED_SSO_LIMIT_MS, SsoChain, isJmapProxyPath, isSsoStart, looksLikeProviderLogout, parse, sameOrigin } from './navigation-rules';
 import { adoptDialogSurface, dialogSurfaceOptions, isDialogFrameName } from './dialog-surfaces';
@@ -141,10 +143,14 @@ function handleWindowOpen(contents: WebContents, options: GuardOptions) {
   });
 }
 
-/** Instance mode: inside the redirect chain any https page may show. */
-function guardNavigation(contents: WebContents, options: GuardOptions): void {
+/**
+ * Instance mode: inside the redirect chain any https page may show. A sign-in window starts
+ * inside it, and always with the time limit.
+ */
+function guardNavigation(contents: WebContents, options: GuardOptions, signIn = false): void {
   const { origin, mode } = options;
-  const chain = new SsoChain(() => (options.forced?.() ? FORCED_SSO_LIMIT_MS : null));
+  const chain = new SsoChain(() => (signIn || options.forced?.() ? FORCED_SSO_LIMIT_MS : null));
+  if (signIn) chain.start();
 
   const allowed = (target: URL): boolean => {
     if (target.protocol === 'about:' && target.href === 'about:blank') return true;
@@ -181,9 +187,47 @@ function guardNavigation(contents: WebContents, options: GuardOptions): void {
   });
 }
 
-function guardContents(contents: WebContents, options: GuardOptions): void {
+function guardContents(contents: WebContents, options: GuardOptions, signIn = false): void {
   handleWindowOpen(contents, options);
-  guardNavigation(contents, options);
+  guardNavigation(contents, options, signIn);
+}
+
+/** The plugin callback page parks its payload here first (webmail lib/plugin-oauth.ts). */
+const PLUGIN_CALLBACK_KEY = 'plugin-oauth-callback';
+const HANDOVER_POLL_MS = 250;
+const HANDOVER_WAIT_MS = 15_000;
+
+/** Back on the instance, the callback page writes the payload; then the window has done its job. */
+function closeOnceHandedOver(window: BrowserWindow, origin: string): void {
+  let polling = false;
+  window.webContents.on('did-navigate', (_event, url) => {
+    if (polling || parse(url)?.origin !== origin) return;
+    polling = true;
+    const until = Date.now() + HANDOVER_WAIT_MS;
+    const look = async () => {
+      if (window.isDestroyed()) return;
+      const parked = await window.webContents.executeJavaScript(`sessionStorage.getItem(${JSON.stringify(PLUGIN_CALLBACK_KEY)}) !== null`).catch(() => false);
+      if (parked === true) window.close();
+      else if (Date.now() < until) setTimeout(look, HANDOVER_POLL_MS);
+    };
+    void look();
+  });
+}
+
+/**
+ * A plugin's sign-in (isPluginSignIn, checked by the caller): a window on the app's session
+ * without the bridge, so the callback page reaches the storage of the page that started it.
+ * It closes once the page has handed over.
+ */
+export function openSignInWindow(url: string, parent: BrowserWindow | null, options: GuardOptions): BrowserWindow {
+  const preferences = options.windows().webPreferences();
+  const bare = bareWindowOptions(preferences);
+  const window = new BrowserWindow({ ...bare, width: 520, height: 720, ...(parent ? { parent } : {}), webPreferences: { ...bare.webPreferences, session: preferences.session } });
+  window.setBounds(fitInto(window.getBounds(), screen.getDisplayMatching(parent?.getBounds() ?? window.getBounds()).workArea));
+  guardContents(window.webContents, options, true);
+  closeOnceHandedOver(window, options.origin);
+  void window.loadURL(url).catch(() => {});
+  return window;
 }
 
 export function attachWindowGuards(window: BrowserWindow, options: GuardOptions): void {

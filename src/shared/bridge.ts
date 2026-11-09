@@ -62,6 +62,12 @@ export interface BrowserSignInControls {
   nextPassword: (flowId: string) => Promise<PasswordSignInAttempt>;
   answerPassword: (flowId: string, answer: PasswordSignInAnswer) => void;
   outcome: (flowId: string) => Promise<BrowserSignInResult>;
+  /**
+   * Instance mode: a plugin's OAuth request whose redirect_uri is the instance's plugin
+   * callback, in a window on the app's session. Only from a click. False when it isn't one
+   * (the page opens it as a link then).
+   */
+  pluginSignIn: (url: string) => Promise<boolean>;
 }
 
 export type PluginInstallResult =
@@ -1025,6 +1031,7 @@ export const CHANNEL = {
   authPasswordNext: 'bulwark:auth.password.next',
   authPasswordAnswer: 'bulwark:auth.password.answer',
   authPasswordOutcome: 'bulwark:auth.password.outcome',
+  authPluginSignIn: 'bulwark:auth.pluginSignIn',
   pluginsInstall: 'bulwark:plugins.install',
   osSubscribe: 'bulwark:os.subscribe',
   osCommand: 'bulwark:os.command',

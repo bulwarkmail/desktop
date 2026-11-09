@@ -192,6 +192,10 @@ if (allowedOrigin && /^https?:$/.test(window.location.protocol) && window.locati
     nextPassword: (flowId: string) => ipcRenderer.invoke(CHANNEL.authPasswordNext, flowId),
     answerPassword: (flowId: string, answer: PasswordSignInAnswer) => ipcRenderer.send(CHANNEL.authPasswordAnswer, flowId, answer),
     outcome: (flowId: string) => ipcRenderer.invoke(CHANNEL.authPasswordOutcome, flowId),
+    pluginSignIn: (url: string) => {
+      if (!clicked() || mode !== 'instance') return Promise.resolve(false);
+      return ipcRenderer.invoke(CHANNEL.authPluginSignIn, url);
+    },
   };
   const common = {
     version: BRIDGE_VERSION,

@@ -11,6 +11,8 @@ import { app, BrowserWindow, shell, type IpcMainInvokeEvent, type WebContents } 
 import { CHANNEL, type BrowserSignInBegin, type PasswordSignInAnswer } from '../../shared/bridge';
 import { effectivePolicyValue } from '../../shared/policy-schema';
 import { LoopbackSignIn } from '../browser-sign-in';
+import { openSignInWindow } from '../navigation';
+import { isPluginSignIn, parse } from '../navigation-rules';
 import { serverOrigin } from '../server-address';
 import { uiLanguageNow } from '../strings';
 import { addWipeStep } from './local-wipe';
@@ -91,6 +93,16 @@ export function setupBrowserSignIn(ctx: FeatureContext): LoopbackSignIn {
     const begun = await signIn.begin(event.sender.id, 'oauth', serverOrigin(serverUrl));
     if (begun.ok) watchOwner(signIn, event.sender);
     return begun;
+  });
+  // A plugin's OAuth: in the system browser its callback page would park the code in that
+  // browser's storage, out of the page's reach. Only through the bridge, so a link in a
+  // message with the same address still goes to the browser.
+  ctx.handle(CHANNEL.authPluginSignIn, (_event, window, url) => {
+    if (ctx.mode !== 'instance' || typeof url !== 'string') return false;
+    const parsed = parse(url);
+    if (!parsed || !isPluginSignIn(parsed, ctx.origin)) return false;
+    openSignInWindow(parsed.toString(), window, { mode: ctx.mode, origin: ctx.origin, windows: () => ctx.windows });
+    return true;
   });
   ctx.handle(CHANNEL.authComplete, (event, _window, flowId, url) => signIn.complete(flowId, url, event.sender.id));
   ctx.handle(CHANNEL.authUseScheme, (event, _window, flowId) => signIn.useScheme(flowId, event.sender.id));

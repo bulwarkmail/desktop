@@ -166,6 +166,42 @@ test('other links open in the system browser, and the SSO chain stays in the win
   expect(new URL(page.url()).origin).toBe(INSTANCE);
 });
 
+test('a plugin sign-in opens in the app only through the bridge; the same address as a link goes to the browser', async () => {
+  const authorize = new URL('https://stalwart-1.internal.bulwarkmail.org/.well-known/jmap');
+  authorize.searchParams.set('redirect_uri', `${INSTANCE}/en/plugins/oauth/callback`);
+
+  // A link in a message opens this way: the system browser, no window.
+  await page.evaluate((url) => {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }, authorize.toString());
+  await expect.poll(() => opened(app)).toContain(authorize.toString());
+
+  const call = (url: string) =>
+    app.evaluate(async ({ BrowserWindow, ipcMain }, { url: target, instance }) => {
+      const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, (e: unknown, ...args: unknown[]) => unknown> })._invokeHandlers;
+      const window = BrowserWindow.getAllWindows().reduce((a, b) => (a.id < b.id ? a : b));
+      return handlers.get('bulwark:auth.pluginSignIn')!({ sender: window.webContents, senderFrame: { url: `${instance}/en/`, parent: null } }, target);
+    }, { url, instance: INSTANCE });
+
+  expect(await call('https://example.com/?redirect_uri=' + encodeURIComponent(`${INSTANCE}/en/auth/callback`))).toBe(false);
+  const [child, answer] = await Promise.all([app.waitForEvent('window'), call(authorize.toString())]);
+  expect(answer).toBe(true);
+  await child.waitForURL(/stalwart-1\.internal/);
+  expect(await child.evaluate(() => typeof (window as unknown as { bulwarkDesktop?: unknown }).bulwarkDesktop)).toBe('undefined');
+  const sameSession = await app.evaluate(({ BrowserWindow }) => {
+    const all = BrowserWindow.getAllWindows();
+    const oldest = all.reduce((a, b) => (a.id < b.id ? a : b));
+    const newest = all.reduce((a, b) => (a.id > b.id ? a : b));
+    return newest.webContents.session === oldest.webContents.session;
+  });
+  expect(sameSession).toBe(true);
+  // Back on the instance, the page parks the payload and the window closes.
+  await child.evaluate((url) => {
+    location.href = url;
+  }, `${INSTANCE}/en/plugins/oauth/callback?code=c&state=s`);
+  await child.waitForEvent('close', { timeout: 20_000 });
+});
+
 test('an instance that predates the integrated chrome gets a native frame, remembered', async () => {
   const knows = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--titlebar-right-inset') !== '');
   const remembered = await app.evaluate(({ app: electronApp }) => electronApp.getPath('userData'));
