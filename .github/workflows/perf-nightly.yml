@@ -3,6 +3,9 @@ name: Start-up and idle check
 # Every night, and by hand: a Linux test package of main, built with the webmail's main, signed
 # in to a throwaway Stalwart (the webmail's integration server, its test account alice) with a
 # few hundred messages, started cold ten times under xvfb, then left alone for five minutes.
+# The app reaches that server over https, through nginx with a certificate from a CA made here,
+# as it reaches a real one: a plain http server gets no push stream in the app, and its 3 s
+# poll would be measured instead.
 # scripts/perf-check.mjs measures the time to the first mail row, the shell's share of it
 # (to the page's navigation start), and idle memory (PSS), CPU and wake-ups of all processes.
 # Over a budget in test/perf-budgets.json fails the run, and so does a package whose server
@@ -61,7 +64,7 @@ jobs:
       - name: Install it, and a headless desktop
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb dbus-x11 gnome-keyring ./release-test/*.deb
+          sudo apt-get install -y -qq xvfb dbus-x11 gnome-keyring libnss3-tools nginx ./release-test/*.deb
 
       - name: Start the test server
         working-directory: webmail-src/integration
@@ -71,6 +74,53 @@ jobs:
           docker compose --env-file .env up -d --build --wait --wait-timeout 300 stalwart
           echo "BULWARK_PERF_PASSWORD=$(sed -n 's/^TEST_ACCOUNT_PASSWORD=//p' .env)" >> "$GITHUB_ENV"
 
+      - name: Put https in front of it
+        run: |
+          tls="$RUNNER_TEMP/tls"
+          mkdir -p "$tls"
+          cd "$tls"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=Bulwark perf check CA" \
+            -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+            -keyout ca.key -out ca.pem 2>/dev/null
+          openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" -keyout server.key -out server.csr 2>/dev/null
+          printf '%s\n' "subjectAltName=DNS:localhost" "extendedKeyUsage=serverAuth" "basicConstraints=CA:FALSE" > server.ext
+          openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -extfile server.ext -out server.pem 2>/dev/null
+          # Chromium on Linux takes the user's trust from this NSS database.
+          mkdir -p "$HOME/.pki/nssdb"
+          [ -f "$HOME/.pki/nssdb/cert9.db" ] || certutil -d "sql:$HOME/.pki/nssdb" -N --empty-password
+          certutil -d "sql:$HOME/.pki/nssdb" -A -t "C,," -n "Bulwark perf check CA" -i ca.pem
+          cat > nginx.conf <<EOF
+          pid $tls/nginx.pid;
+          error_log $tls/error.log;
+          events {}
+          http {
+            access_log off;
+            client_body_temp_path $tls/body;
+            proxy_temp_path $tls/proxy;
+            fastcgi_temp_path $tls/fastcgi;
+            uwsgi_temp_path $tls/uwsgi;
+            scgi_temp_path $tls/scgi;
+            server {
+              listen 127.0.0.1:8443 ssl http2;
+              server_name localhost;
+              ssl_certificate $tls/server.pem;
+              ssl_certificate_key $tls/server.key;
+              client_max_body_size 100m;
+              location / {
+                proxy_pass http://127.0.0.1:8025;
+                proxy_http_version 1.1;
+                proxy_set_header Host \$http_host;
+                proxy_set_header X-Forwarded-Proto https;
+                # The push stream comes through as it's written.
+                proxy_buffering off;
+                proxy_read_timeout 1h;
+              }
+            }
+          }
+          EOF
+          nginx -c "$tls/nginx.conf" -p "$tls" -e "$tls/error.log"
+          curl -fsS --cacert ca.pem -o /dev/null -u "alice@example.org:$BULWARK_PERF_PASSWORD" https://localhost:8443/.well-known/jmap
+
       - name: Fill the Inbox
         env:
           BULWARK_PERF_SERVER: http://localhost:8025
@@ -79,7 +129,7 @@ jobs:
 
       - name: Start-up and idle
         env:
-          BULWARK_PERF_SERVER: http://localhost:8025
+          BULWARK_PERF_SERVER: https://localhost:8443
           BULWARK_PERF_USER: alice@example.org
         run: |
           export DISPLAY=:99

@@ -259,7 +259,7 @@ async function idle(profile) {
 
 const profile = mkdtempSync(path.join(tmpdir(), 'bulwark-perf-'));
 // The server counts as allowed already. A plain http or LAN server (the nightly job's
-// http://localhost) otherwise gets a prompt at sign-in that nobody here answers, and its
+// https://localhost) otherwise gets a prompt at sign-in that nobody here answers, and its
 // Cancel default stops the sign-in. For a public https server it changes nothing.
 writeFileSync(path.join(profile, 'shell-state.json'), JSON.stringify({ mode: 'standalone', approvedServers: [{ origin: new URL(server).origin, approvedAt: Date.now() }] }));
 const result = { app, runs: [], errors: [] };
