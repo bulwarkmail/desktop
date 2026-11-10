@@ -99,6 +99,16 @@ async function appPage(browser, deadline) {
   throw new Error(`no app window; driver saw ${JSON.stringify(browser.contexts().flatMap((c) => c.pages().map((p) => p.url())))}, Chromium lists ${JSON.stringify(targets.map((t) => `${t.type} ${t.url}`.slice(0, 120)))}`);
 }
 
+/** What the app shows when the mail list doesn't come: its windows, the page's URL and text, a screenshot. */
+async function whereItStopped(browser, page) {
+  const targets = await fetch(`http://127.0.0.1:${port}/json/list`).then((r) => r.json()).catch(() => []);
+  const windows = targets.filter((t) => t.type === 'page').map((t) => t.url.slice(0, 120));
+  const text = await page.evaluate(() => document.body?.innerText ?? '').catch(() => '');
+  const pages = browser.contexts().flatMap((c) => c.pages()).filter((p) => !p.isClosed());
+  for (const [i, shown] of pages.entries()) await shown.screenshot({ path: `perf-stopped-${i}.png` }).catch(() => {});
+  return `windows ${JSON.stringify(windows)}, page ${page.url()} says ${JSON.stringify(text.replace(/\s+/g, ' ').slice(0, 400))}`;
+}
+
 async function signIn(profile) {
   const child = launch(profile);
   const deadline = Date.now() + 120_000;
@@ -126,7 +136,11 @@ async function signIn(profile) {
     await page.fill('#username', user);
     await page.fill('#password', password);
     await page.keyboard.press('Enter');
-    await page.locator(ROW).first().waitFor({ state: 'visible', timeout: 90_000 });
+    try {
+      await page.locator(ROW).first().waitFor({ state: 'visible', timeout: 90_000 });
+    } catch (error) {
+      throw new Error(`${String(error?.message ?? error).split('\n')[0]}; after signing in: ${await whereItStopped(browser, page)}`);
+    }
     // The first sync settles and the session reaches the disk.
     await sleep(15_000);
   } finally {
