@@ -158,7 +158,11 @@ async function coldStart(profile) {
   try {
     browser = await connect(deadline);
     const page = await appPage(browser, deadline);
-    await page.locator(ROW).first().waitFor({ state: 'visible', timeout: Math.max(1, deadline - Date.now()) });
+    try {
+      await page.locator(ROW).first().waitFor({ state: 'visible', timeout: Math.max(1, deadline - Date.now()) });
+    } catch (error) {
+      throw new Error(`${String(error?.message ?? error).split('\n')[0]}; after a restart: ${await whereItStopped(browser, page)}`);
+    }
     const rowsAt = Date.now();
     const page_ = await page.evaluate((selector) => ({
       origin: performance.timeOrigin,
@@ -308,6 +312,13 @@ try {
   result.errors.push(String(error?.message ?? error));
   console.log(`ERROR ${error?.message ?? error}`);
 } finally {
+  // The app's own logs say why a start went wrong; the profile goes next.
+  if (result.errors.length) {
+    for (const name of (() => { try { return readdirSync(path.join(profile, 'logs')); } catch { return []; } })()) {
+      const lines = readFileSync(path.join(profile, 'logs', name), 'utf8').trimEnd().split('\n').slice(-25);
+      console.log(`--- ${name}, last lines:\n${lines.join('\n')}`);
+    }
+  }
   rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
 }
 
