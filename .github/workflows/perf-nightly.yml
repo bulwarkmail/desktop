@@ -85,7 +85,10 @@ jobs:
           openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" -keyout server.key -out server.csr 2>/dev/null
           printf '%s\n' "subjectAltName=DNS:localhost" "extendedKeyUsage=serverAuth" "basicConstraints=CA:FALSE" > server.ext
           openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -extfile server.ext -out server.pem 2>/dev/null
-          # Chromium on Linux takes the user's trust from this NSS database.
+          # The app's server process trusts the system store (src/server/host.ts), and Chromium
+          # on Linux the user's NSS database.
+          sudo cp ca.pem /usr/local/share/ca-certificates/bulwark-perf-check.crt
+          sudo update-ca-certificates >/dev/null
           mkdir -p "$HOME/.pki/nssdb"
           [ -f "$HOME/.pki/nssdb/cert9.db" ] || certutil -d "sql:$HOME/.pki/nssdb" -N --empty-password
           certutil -d "sql:$HOME/.pki/nssdb" -A -t "C,," -n "Bulwark perf check CA" -i ca.pem
