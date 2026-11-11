@@ -13,6 +13,7 @@ import { closeDictionaryDownloads, DEAD_DICTIONARY_URL } from '../src/main/spell
 import { APP_ORIGIN, fakeOsIntegration, launch, shownPage, launchStandalone, prompts, removeProfile, tempProfile, waitForLogin } from './helpers';
 import { clickMenuItem, lastMenu, menuCount, menuItem, pageWith, pickNext, recordMenus, type SeenItem } from './native-helpers';
 import { startHostileInstance, type HostileInstance } from './support/hostile-instance-2';
+import { startInputInstance, type InputInstance } from './support/input-instance';
 
 test.describe('the pure parts', () => {
   test('a deep link is parsed down to a message or a folder', () => {
@@ -1887,6 +1888,83 @@ test.describe('a line of the page\'s own menu bar runs only on a click or key ma
     try {
       await expect.poll(() => lootOf('menu-done').length, { timeout: 30_000 }).toBe(1);
       expect(lootOf('activation')[0]).toEqual({ 'file.saveAs': false, 'file.import': false });
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+});
+
+test.describe('the in-window menu bar and the user\'s real input', () => {
+  // An instance whose page runs lines of the bar on input (test/support/input-instance.ts).
+  test.skip(process.platform !== 'win32', 'the page draws the bar on Windows and Linux; Windows here');
+  let instance: InputInstance;
+  test.beforeAll(async () => {
+    instance = await startInputInstance(3845);
+  });
+  test.afterAll(() => instance?.close());
+
+  const lootOf = (kind: string) => instance.loot.filter((entry) => entry.kind === kind).map((entry) => entry.body);
+  const zoomLevel = (app: ElectronApplication) => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((w) => w.isVisible())!.webContents.getZoomLevel());
+
+  /** The instance's page in `mode`, every outside program stood in for, every question answered with `answer`. */
+  async function openInstance(profile: string, mode: InputInstance['mode'], answer = 1): Promise<{ app: ElectronApplication; page: Page }> {
+    instance.loot.length = 0;
+    instance.mode = 'idle';
+    const app = await launch(profile, `--instance=${instance.origin}/`, '--ignore-certificate-errors', '--bulwark-test-no-native');
+    const page = await shownPage(app);
+    await app.evaluate(({ app: electronApp, shell, BrowserWindow }) => {
+      electronApp.relaunch = () => undefined;
+      shell.openPath = async () => '';
+      shell.showItemInFolder = () => undefined;
+      const g = globalThis as unknown as { __pastes: number };
+      g.__pastes = 0;
+      // Paste is stood in for: nothing here reads the clipboard.
+      for (const window of BrowserWindow.getAllWindows()) {
+        const count = () => {
+          g.__pastes += 1;
+        };
+        window.webContents.paste = count;
+        (Object.getPrototypeOf(window.webContents) as { paste: () => void }).paste = count;
+      }
+    });
+    await fakeOsIntegration(app, answer);
+    await expect.poll(() => lootOf('bridge').length).toBeGreaterThan(0);
+    await expect.poll(() => app.evaluate(() => (globalThis as unknown as { __bulwarkOs: { hub: { locked: boolean } } }).__bulwarkOs.hub.locked), { timeout: 30_000 }).toBe(false);
+    instance.loot.length = 0;
+    instance.mode = mode;
+    await page.reload();
+    return { app, page };
+  }
+
+  /** A key as the OS sends it through the browser's input path: a raw key down, its character, the key up. */
+  async function pressKey(page: Page, key: string, code: string, vk: number, text: string): Promise<void> {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk });
+    if (text) await cdp.send('Input.dispatchKeyEvent', { type: 'char', key, code, text, unmodifiedText: text, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk });
+    await cdp.detach();
+  }
+
+  test('from the keyboard: Enter and Space run the line, a letter and an arrow do not', async () => {
+    const profile = tempProfile('menu-keys');
+    const { app, page } = await openInstance(profile, 'key-pick');
+    try {
+      await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
+      const levels: number[] = [await zoomLevel(app)];
+      // Each key runs Zoom in on the page's side. Playwright's own key press sends Enter and
+      // Space as another kind of key down than the OS does, so the keys go in as the OS sends them.
+      for (const [key, code, vk, text] of [['p', 'KeyP', 80, 'p'], ['Enter', 'Enter', 13, '\r'], [' ', 'Space', 32, ' '], ['ArrowDown', 'ArrowDown', 40, '']] as const) {
+        // Past the second a pick lasts, so each key stands alone.
+        await page.waitForTimeout(1_300);
+        await pressKey(page, key, code, vk, text);
+        await expect.poll(() => lootOf('key-ran').length, { timeout: 10_000 }).toBe(levels.length);
+        levels.push(await zoomLevel(app));
+      }
+      expect(levels[1], 'a letter').toBe(levels[0]);
+      expect(levels[2], 'Enter').toBeGreaterThan(levels[1]);
+      expect(levels[3], 'Space').toBeGreaterThan(levels[2]);
+      expect(levels[4], 'an arrow').toBe(levels[3]);
     } finally {
       await app.close().catch(() => {});
       removeProfile(profile);

@@ -7,6 +7,7 @@ import { expect, test, type ElectronApplication, type Page } from '@playwright/t
 import { ACCOUNT, dialogHost, ENT_PASSWORD, expectMailShown, fakeOsIntegration, fillLogin, launch, launchStandalone, opened, removeOsTraces, removeProfile, requireAccount, shownPage, STALWARTS, tempProfile, waitForLogin } from './helpers';
 import { pageWith } from './native-helpers';
 import { startHostileInstance, type HostileInstance } from './support/hostile-instance';
+import { startInputInstance, type InputInstance } from './support/input-instance';
 
 /**
  * Everything that opens the app from outside, end to end on a real server: mail links in
@@ -457,6 +458,50 @@ test.describe('links a page hands to other programs', () => {
       await page.waitForTimeout(10_500);
       await call('https://example.org/7');
       await expect.poll(() => opened(app)).toContain('https://example.org/7');
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+});
+
+test.describe('links on a page used with the keyboard', () => {
+  // An instance whose page has a phone link with the focus (test/support/input-instance.ts).
+  let instance: InputInstance;
+  test.beforeAll(async () => {
+    instance = await startInputInstance(3846);
+  });
+  test.afterAll(() => instance?.close());
+
+  /** The instance's page in `mode`, with the system browser and every other program stood in for. */
+  async function openInstance(profile: string, mode: InputInstance['mode']): Promise<{ app: ElectronApplication; page: Page }> {
+    instance.loot.length = 0;
+    instance.mode = 'idle';
+    const app = await launch(profile, `--instance=${instance.origin}/`, '--ignore-certificate-errors', '--bulwark-test-no-native');
+    const page = await shownPage(app);
+    await app.evaluate(({ app: electronApp }) => {
+      electronApp.relaunch = () => undefined;
+    });
+    await fakeOsIntegration(app, 1);
+    await expect.poll(() => instance.loot.some((entry) => entry.kind === 'bridge')).toBe(true);
+    instance.loot.length = 0;
+    instance.mode = mode;
+    await page.reload();
+    return { app, page };
+  }
+
+  test('a phone link opens when the user presses Enter on it', async () => {
+    const profile = tempProfile('links-enter');
+    const { app, page } = await openInstance(profile, 'key-link');
+    try {
+      await expect.poll(() => instance.loot.filter((entry) => entry.kind === 'ready').map((entry) => entry.body), { timeout: 30_000 }).toEqual([true]);
+      // Enter as the OS sends it, through the browser's input path: a raw key down, its character, the key up.
+      const cdp = await page.context().newCDPSession(page);
+      const enter = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+      await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...enter });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'char', ...enter, text: '\r', unmodifiedText: '\r' });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...enter });
+      await expect.poll(() => opened(app), { timeout: 8_000 }).toContain('tel:+4930555');
     } finally {
       await app.close().catch(() => {});
       removeProfile(profile);
