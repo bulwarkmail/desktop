@@ -5,7 +5,12 @@
 //
 //   BULWARK_PERF_SERVER=<jmap url> BULWARK_PERF_USER=<address> BULWARK_PERF_PASSWORD=<password> \
 //     node scripts/perf-check.mjs --app /opt/Bulwark/bulwark [--runs 10] [--idle-minutes 5]
-//     [--idle-window 120] [--out result.json] [--budget budgets.json]
+//     [--idle-window 120] [--settle-minutes 15] [--settle-quiet 1000] [--out result.json]
+//     [--budget budgets.json]
+//
+// After signing in, the app is left to finish its first sync: on Linux until its wake-ups stay
+// under --settle-quiet a minute for 30 s, at most --settle-minutes. The rows show long before
+// the offline store has fetched every message, and the budgets are for a settled profile.
 //
 // Each run: the time from just before the process starts to the first mail row on screen
 // (read over the remote debugging port, which only a test build opens), and to the page's
@@ -41,6 +46,8 @@ const idleWindow = Number(option('idle-window', '120'));
 const out = option('out');
 const budgetFile = option('budget');
 const port = Number(option('port', '9333'));
+const settleMinutes = Number(option('settle-minutes', '15'));
+const settleQuiet = Number(option('settle-quiet', '1000'));
 const { BULWARK_PERF_SERVER: server, BULWARK_PERF_USER: user, BULWARK_PERF_PASSWORD: password } = process.env;
 if (!app || !server || !user || !password) {
   console.error('usage: BULWARK_PERF_SERVER=… BULWARK_PERF_USER=… BULWARK_PERF_PASSWORD=… node scripts/perf-check.mjs --app <binary> [options]');
@@ -141,11 +148,35 @@ async function signIn(profile) {
     } catch (error) {
       throw new Error(`${String(error?.message ?? error).split('\n')[0]}; after signing in: ${await whereItStopped(browser, page)}`);
     }
-    // The first sync settles and the session reaches the disk.
-    await sleep(15_000);
+    // Off the debugging port, which costs wake-ups of its own.
+    await browser.close().catch(() => {});
+    await settle(child.pid);
   } finally {
     await browser.close().catch(() => {});
     await stop(child);
+  }
+}
+
+/**
+ * Waits for the first sync to end and the session to reach the disk. A fresh profile keeps
+ * busy for minutes after the rows show: the offline store fetches each message's raw source,
+ * one a second (RAW_PACE_MS in the webmail's lib/store/mail/attachments.ts).
+ */
+async function settle(pid) {
+  await sleep(15_000);
+  if (process.platform !== 'linux') return;
+  const deadline = Date.now() + settleMinutes * 60_000;
+  for (;;) {
+    const pids = descendants(pid);
+    const before = pids.map((p) => sample(p).wakeups);
+    await sleep(30_000);
+    const perMinute = 2 * pids.reduce((sum, p, i) => sum + Math.max(0, sample(p).wakeups - before[i]), 0);
+    console.log(`settling: ${perMinute} wake-ups a minute`);
+    if (perMinute < settleQuiet) return;
+    if (Date.now() > deadline) {
+      console.log(`not quiet after ${settleMinutes} minutes; measuring as it is`);
+      return;
+    }
   }
 }
 
