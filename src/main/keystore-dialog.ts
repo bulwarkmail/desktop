@@ -9,6 +9,7 @@
 
 import type { ConsentAnswer, ConsentQuestion } from './keystore-consent';
 import { fillKeystoreText, type KeystoreText } from './keystore-strings';
+import { shownHost } from './navigation-rules';
 
 const MAX_NAME = 200;
 
@@ -34,7 +35,7 @@ export interface KeystoreDialog {
 
 /** `standalone`: the only page is the app's own, and its internal host name means nothing to anyone. */
 export function keystoreDialog(question: ConsentQuestion, text: KeystoreText, standalone: boolean, language: string): KeystoreDialog {
-  const who = standalone ? text.thisApp : new URL(question.origin).host;
+  const who = standalone ? text.thisApp : shownHost(new URL(question.origin).host);
   if (question.kind === 'first-use') {
     return {
       message: fillKeystoreText(text.firstUseTitle, { who }),

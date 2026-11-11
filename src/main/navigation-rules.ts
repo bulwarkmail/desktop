@@ -101,6 +101,34 @@ export function externalOpenAllowed(url: URL | null, clicked: boolean, recent: n
   return CLICK_SCHEMES.has(url.protocol) && clicked;
 }
 
+/** The longest a server's name is shown in a question: past this it would push the rest out of view. */
+export const SHOWN_HOST_MAX = 52;
+
+/**
+ * A server's host (as `URL.host` gives it, punycode and port included) the way a question shows
+ * it: whole when it's short, else shortened in the middle of its left-hand labels, so the end
+ * that says whose server it is always shows. That end is the last two labels, or three under
+ * a country code with a short second level (`example.co.uk`); there is no public suffix list
+ * here, so for a name like `x.github.io` it keeps less than the registrable part. The port and
+ * an IPv6 literal are never cut.
+ */
+export function shownHost(host: string, max = SHOWN_HOST_MAX): string {
+  if (host.length <= max || host.startsWith('[')) return host;
+  const port = /:\d+$/.exec(host)?.[0] ?? '';
+  const labels = host.slice(0, host.length - port.length).split('.');
+  const last = labels[labels.length - 1] ?? '';
+  const second = labels[labels.length - 2] ?? '';
+  const keep = labels.length >= 3 && /^[a-z]{2}$/i.test(last) && second.length <= 3 ? 3 : 2;
+  if (labels.length <= keep) return host;
+  const tail = `${labels.slice(-keep).join('.')}${port}`;
+  const head = labels.slice(0, -keep).join('.');
+  // What's left for the left-hand part, less the dot before the tail and the ellipsis.
+  const room = max - tail.length - 2;
+  if (room < 2) return `….${tail}`;
+  const start = Math.ceil(room / 2);
+  return `${head.slice(0, start)}…${head.slice(head.length - (room - start))}.${tail}`;
+}
+
 export function looksLikeProviderLogout(url: URL): boolean {
   return (
     url.searchParams.has('post_logout_redirect_uri') ||

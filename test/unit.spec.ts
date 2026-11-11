@@ -9,7 +9,7 @@ import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { expect, test } from '@playwright/test';
 import { fingerprintOf, generateCertificate } from '../src/main/cert';
-import { externalOpenAllowed, isJmapProxyPath, isSsoStart, looksLikeProviderLogout, parse, UNCLICKED_OPEN_MAX, UNCLICKED_OPEN_MS } from '../src/main/navigation-rules';
+import { externalOpenAllowed, isJmapProxyPath, isSsoStart, looksLikeProviderLogout, parse, shownHost, SHOWN_HOST_MAX, UNCLICKED_OPEN_MAX, UNCLICKED_OPEN_MS } from '../src/main/navigation-rules';
 import { isPrivateAddress, isPrivateHost, isRealHostname, serverOrigin } from '../src/main/server-address';
 import { CorsInjector } from '../src/main/cors';
 import { pluginFacts, pluginPrompt, type PromptText } from '../src/main/plugin-prompt';
@@ -211,6 +211,26 @@ test.describe('navigation rules', () => {
       expect(decide(url, true), url).toBe(false);
       expect(decide(url, false), url).toBe(false);
     }
+  });
+
+  test('a question names a long server by the end that says whose it is, shortened in the middle of the left-hand part', () => {
+    // As short as a question needs: whole.
+    for (const host of ['mail.example.org', 'localhost:3947', 'xn--pple-43d.localhost:3947', '192.168.1.10:8080', '[2001:db8::1]:8443']) expect(shownHost(host)).toBe(host);
+    // A name that starts like a trusted one and ends in another domain.
+    const long = `mail.example.com.${'a'.repeat(60)}.${'b'.repeat(60)}.${'c'.repeat(60)}.evil-domain.localhost:3947`;
+    const shown = shownHost(long);
+    expect(shown.length).toBeLessThanOrEqual(SHOWN_HOST_MAX);
+    expect(shown.endsWith('.evil-domain.localhost:3947'), shown).toBe(true);
+    expect(shown.startsWith('mail.'), shown).toBe(true);
+    expect(shown.split('…')).toHaveLength(2);
+    // Three labels under a country code with a short second level, punycode as it is.
+    expect(shownHost(`${'x'.repeat(70)}.mail.example.co.uk`).endsWith('.example.co.uk')).toBe(true);
+    expect(shownHost(`${'a'.repeat(70)}.xn--pple-43d.com`).endsWith('.xn--pple-43d.com')).toBe(true);
+    // An end longer than the room there is: all of it, and nothing of the left.
+    const wide = `www.${'c'.repeat(63)}.com:8443`;
+    expect(shownHost(wide)).toBe(`….${'c'.repeat(63)}.com:8443`);
+    // Whatever the length on the left, the end stays whole.
+    for (let n = 1; n <= 200; n += 37) expect(shownHost(`${'q'.repeat(n)}.mail.evil.example`).endsWith('.evil.example')).toBe(true);
   });
 });
 
