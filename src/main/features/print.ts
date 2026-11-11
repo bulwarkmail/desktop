@@ -4,16 +4,18 @@
  * - The page asks with `print.preview`: itself (the calendar's and contacts' print copies),
  *   a print window it opened as `bulwark-print-…` (one message, a plugin's page), or a PDF.
  * - File > Print and Ctrl+P: a page that listens (`print.onRequest`) runs its own Print, so
- *   the preview gets its look and what it would print; any other window is previewed as its
- *   print CSS lays it out.
+ *   the preview gets its look and what it would print; a window that is a PDF shows the PDF;
+ *   any other window is previewed as its print CSS lays it out.
+ * - The print button of Chromium's PDF viewer in a window that is a PDF (pdf-viewer-print.ts).
  *
  * The page's menu state is the device policy here, as for the menu items: `file.print` off
  * takes the printers away, `file.savePdf` off takes Save as PDF away, both off and nothing
  * opens.
  */
 
-import { BrowserWindow, type WebContents } from 'electron';
+import { app, BrowserWindow, webContents, type WebContents } from 'electron';
 import { CHANNEL, type MenuState, type PrintPreviewOutcome } from '../../shared/bridge';
+import { watchPdfViewers, windowPdfViewer } from '../pdf-viewer-print';
 import { PrintPreviews } from '../print-preview';
 import { readPreviewRequest } from '../print-rules';
 import type { Feature } from './index';
@@ -35,6 +37,12 @@ export function printPreviews(): PrintPreviews | null {
   return previews;
 }
 
+/** A window that is a PDF, as it is, in the preview. */
+function previewPdfWindow(window: BrowserWindow, allowed: { print: boolean; pdf: boolean }): void {
+  if (!previews || window.isDestroyed()) return;
+  void previews.open({ parent: window, source: { kind: 'pdfWindow', contents: window.webContents }, title: window.getTitle(), allowed });
+}
+
 /**
  * File > Print and Ctrl+P on `window`. False when the preview isn't there to take it
  * (the caller prints the old way).
@@ -50,6 +58,10 @@ export function printFromMenu(window: BrowserWindow, state: MenuState | undefine
     contents.send(CHANNEL.printRequested);
     return true;
   }
+  if (windowPdfViewer(contents)) {
+    previewPdfWindow(window, allowed);
+    return true;
+  }
   void previews.open({ parent: window, source: { kind: 'page', contents }, title: window.getTitle(), allowed });
   return true;
 }
@@ -63,6 +75,17 @@ export const printFeature: Feature = {
       return { dark: colours.dark, background: colours.background, foreground: colours.symbol };
     });
     const own = previews;
+
+    // The app's windows only: the preview's own viewer is on sessions of its own.
+    const watchContents = (contents: WebContents) => {
+      if (contents.session !== ctx.session) return;
+      watchPdfViewers(contents, () => {
+        const window = BrowserWindow.fromWebContents(contents);
+        if (window) previewPdfWindow(window, allowedBy(ctx.menu.commandState(window)));
+      });
+    };
+    app.on('web-contents-created', (_event, contents) => watchContents(contents));
+    for (const contents of webContents.getAllWebContents()) watchContents(contents);
 
     ctx.handle(CHANNEL.printPreview, async (event, window, raw): Promise<PrintPreviewOutcome> => {
       const request = readPreviewRequest(raw);

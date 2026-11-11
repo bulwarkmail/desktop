@@ -254,6 +254,86 @@ test('a PDF shows its own pages, without margins or header lines, and prints thr
   await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed() && w.webContents.getURL().startsWith('https://print.bulwark.invalid/')).length)).toBe(0);
 });
 
+/** A PDF of `count` pages, made the way the shell makes them, base64. */
+function makePdf(count: number): Promise<string> {
+  return app.evaluate(async ({ BrowserWindow }, pages) => {
+    const maker = new BrowserWindow({ show: false });
+    const html = Array.from({ length: pages }, (_, i) => `<section style="break-after:page"><h1>PDF page ${i + 1}</h1></section>`).join('');
+    await maker.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    const data = await maker.webContents.printToPDF({});
+    maker.destroy();
+    return data.toString('base64');
+  }, count);
+}
+
+/** The PDF as a blob: window of its own, as the webmail opens an attachment in a new window. Its window id. */
+async function openPdfWindow(pages: number): Promise<number> {
+  const pdf = await makePdf(pages);
+  await page.evaluate((b64) => {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    window.open(URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' })), '_blank');
+  }, pdf);
+  let id = 0;
+  await expect.poll(async () => {
+    id = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && w.webContents.getURL().startsWith('blob:'))?.id ?? 0);
+    return id;
+  }, { timeout: 15_000 }).not.toBe(0);
+  // Until the shell has taken the viewer's print.
+  await expect.poll(() => app.evaluate(async ({ BrowserWindow }, windowId) => {
+    const frame = BrowserWindow.fromId(windowId)?.webContents.mainFrame.framesInSubtree.find((f) => f.url.startsWith('chrome-extension://'));
+    if (!frame) return false;
+    return frame.executeJavaScript(`Object.prototype.hasOwnProperty.call(document.querySelector('pdf-viewer') ?? {}, 'onPrint_')`).catch(() => false);
+  }, id), { timeout: 20_000 }).toBe(true);
+  return id;
+}
+
+function closeWindow(id: number): Promise<void> {
+  return app.evaluate(({ BrowserWindow }, windowId) => BrowserWindow.fromId(windowId)?.destroy(), id);
+}
+
+test('the print button of the PDF viewer in a window of its own opens the preview with the PDF’s pages', async () => {
+  await fakePrinters();
+  const pdfWindow = await openPdfWindow(3);
+  await app.evaluate(({ BrowserWindow }, windowId) => {
+    const frame = BrowserWindow.fromId(windowId)!.webContents.mainFrame.framesInSubtree.find((f) => f.url.startsWith('chrome-extension://'))!;
+    void frame.executeJavaScript(`document.querySelector('pdf-viewer').shadowRoot.querySelector('viewer-toolbar').shadowRoot.querySelector('#print').click()`);
+  }, pdfWindow);
+  const preview = await previewPage();
+  const [shown] = await previewWindows();
+  expect(shown.parent).toBe(pdfWindow);
+  await expect(preview.locator('#count')).toHaveText('3 pages', { timeout: 30_000 });
+  await preview.locator('#destination').selectOption({ label: 'Office Laser' });
+  await preview.locator('#go').click().catch(() => {});
+  await expect.poll(async () => (await jobs()).length).toBe(1);
+  expect((await jobs())[0]).toMatchObject({ kind: 'printer', options: { deviceName: 'Office Laser' } });
+  // The button goes to the preview each time, not to the OS's dialog after the first.
+  await app.evaluate(({ BrowserWindow }, windowId) => {
+    const frame = BrowserWindow.fromId(windowId)!.webContents.mainFrame.framesInSubtree.find((f) => f.url.startsWith('chrome-extension://'))!;
+    void frame.executeJavaScript(`document.querySelector('pdf-viewer').shadowRoot.querySelector('viewer-toolbar').shadowRoot.querySelector('#print').click()`);
+  }, pdfWindow);
+  const again = await previewPage();
+  await expect(again.locator('#count')).toHaveText('3 pages', { timeout: 30_000 });
+  await pressClosing(again, 'Escape');
+  await expect.poll(async () => (await previewWindows()).length).toBe(0);
+  expect((await jobs()).filter((job) => job.kind === 'system')).toEqual([]);
+  await closeWindow(pdfWindow);
+});
+
+test('File > Print (Ctrl+P) in a window that is a PDF shows the PDF’s pages', async () => {
+  await fakePrinters();
+  const pdfWindow = await openPdfWindow(2);
+  await app.evaluate(({ BrowserWindow, Menu }, windowId) => {
+    BrowserWindow.fromId(windowId)!.focus();
+    Menu.getApplicationMenu()?.getMenuItemById('file.print')?.click();
+  }, pdfWindow);
+  const preview = await previewPage();
+  expect((await previewWindows())[0].parent).toBe(pdfWindow);
+  await expect(preview.locator('#count')).toHaveText('2 pages', { timeout: 30_000 });
+  await pressClosing(preview, 'Escape');
+  await expect.poll(async () => (await previewWindows()).length).toBe(0);
+  await closeWindow(pdfWindow);
+});
+
 test('each printer comes back with its own choices', async () => {
   await askPreview();
   const preview = await previewPage();

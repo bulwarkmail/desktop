@@ -6,7 +6,8 @@
  *
  * What it shows (a source): a print window the page opened hidden (one message, a plugin's
  * page, and in a current webmail the print copies of mail, calendar and contacts), a PDF
- * (the file viewer, a plugin's PDF), or a page of the app as its print CSS lays it out (File >
+ * (the file viewer, a plugin's PDF), a window that is a PDF (an attachment opened in a window
+ * of its own, pdf-viewer-print.ts), or a page of the app as its print CSS lays it out (File >
  * Print on a page that doesn't take it itself, an older webmail). Laying out a page that is
  * on screen moves it: at the sheet's width its width breakpoints match for a moment, and the
  * mail sidebar folded and unfolded at every change in the preview. So the webmail hands over
@@ -37,6 +38,8 @@ import { app, BrowserWindow, dialog, ipcMain, screen, session as electronSession
 import { CHANNEL, type PrintPreviewOutcome } from '../shared/bridge';
 import { readLook, type DialogLook } from './dialog-window-rules';
 import { holdParent, parentHeldByHand } from './parent-hold';
+// Chromium's PDF viewer, the one extension the preview's sessions may load.
+import { PDF_VIEWER } from './pdf-viewer-print';
 import { pdfFileName } from './menu-text';
 import { showMessageBox } from './message-box';
 import { native } from './native';
@@ -78,8 +81,6 @@ const PREVIEW_PARTITION = 'bulwark-print';
 const PDF_PARTITION = 'bulwark-print-pdf';
 /** Where a PDF source is served from, inside its own session only. */
 const PDF_URL = 'https://print.bulwark.invalid/document.pdf';
-/** Chromium's PDF viewer, the one extension the preview's session may load. */
-const PDF_VIEWER = 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/';
 const MAX_PDF_BYTES = 200 * 1024 * 1024;
 /** How long a print window may wait hidden for its page to ask for the preview. */
 const POPUP_WAIT_MS = 60_000;
@@ -110,7 +111,12 @@ type ShellLook = () => { dark: boolean; background?: string; foreground?: string
 export interface PrintSourceRequest {
   /** The window the preview hangs on. */
   parent: BrowserWindow;
-  source: { kind: 'page'; contents: WebContents } | { kind: 'window'; window: BrowserWindow } | { kind: 'pdf'; data: Uint8Array };
+  source:
+    | { kind: 'page'; contents: WebContents }
+    | { kind: 'window'; window: BrowserWindow }
+    | { kind: 'pdf'; data: Uint8Array }
+    /** A window of the app that is a PDF in Chromium's viewer: printed as it is, and left open. */
+    | { kind: 'pdfWindow'; contents: WebContents };
   title: string;
   /** The page's look (DialogWindowTheme), unchecked. */
   theme?: unknown;
@@ -369,6 +375,8 @@ export class PrintPreviews {
     let source: Source;
     if (request.source.kind === 'page') {
       source = { contents: request.source.contents, kind: 'html' };
+    } else if (request.source.kind === 'pdfWindow') {
+      source = { contents: request.source.contents, kind: 'pdf' };
     } else if (request.source.kind === 'window') {
       const popup = request.source.window;
       source = { contents: popup.webContents, kind: 'html', close: () => { if (!popup.isDestroyed()) popup.destroy(); } };
