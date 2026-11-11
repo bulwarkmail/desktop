@@ -1,9 +1,10 @@
 /**
  * Where a window may go.
  *
- * The app stays on its origin. Anything else opens in the system browser. The
- * exceptions are the ones the webmail depends on: about:blank and blob: pop-ups
- * for print and previews (print calls document.write on the pop-up), and in
+ * The app stays on its origin. Anything else opens in the system browser, or in the
+ * program the OS has for a mail, phone, text or calendar address, by the rules in
+ * openExternally. The exceptions are the ones the webmail depends on: about:blank and
+ * blob: pop-ups for print and previews (print calls document.write on the pop-up), and in
  * instance mode the SSO redirect chain, which has to run in the window so the
  * instance's own cookies come back with it. A plugin's sign-in, which the webmail
  * asks for through the bridge, runs in a window of its own on the same session for the
@@ -12,22 +13,38 @@
 
 import { BrowserWindow, screen, shell, type BrowserWindowConstructorOptions, type WebContents, type WebPreferences } from 'electron';
 import type { Mode } from '../shared/bridge';
-import { FORCED_SSO_LIMIT_MS, SsoChain, isJmapProxyPath, isSsoStart, looksLikeProviderLogout, parse, sameOrigin } from './navigation-rules';
+import { FORCED_SSO_LIMIT_MS, SsoChain, UNCLICKED_OPEN_MS, externalOpenAllowed, isJmapProxyPath, isSsoStart, looksLikeProviderLogout, parse, sameOrigin } from './navigation-rules';
 import { adoptDialogSurface, dialogSurfaceOptions, isDialogFrameName } from './dialog-surfaces';
 import { printPreviews } from './features/print';
 import { isPrintFrameName } from './print-rules';
+import { takeUserGesture, watchUserGestures } from './user-gesture';
 import { fitInto } from './window-placement';
 import { windowTypeOf, type WindowManager } from './windows';
 
-// What links in mail and contacts use. The OS has the handler, or nothing happens.
-const EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:', 'sms:', 'xmpp:', 'webcal:']);
+/** When each window last opened a web address with no click, for the limit (externalOpenAllowed). */
+const unclicked = new WeakMap<WebContents, number[]>();
+/** The same for main's own calls, which have no window. */
+const unclickedOwn: number[] = [];
 
-/** The schemes listed above, for an address the OS can open. Nothing else leaves the app. */
-export function openExternally(url: string): boolean {
+/**
+ * An address in the program the OS has for it, by externalOpenAllowed. `from` is who asked: a
+ * window, whose click main saw or not (the gesture is spent), or `user` for a pick in a menu
+ * the OS drew. With none it's main's own address, held to the rules of a call with no click.
+ */
+export function openExternally(url: string, from?: WebContents | 'user'): boolean {
   const parsed = parse(url);
-  if (!parsed || !EXTERNAL_PROTOCOLS.has(parsed.protocol)) return false;
-  if (parsed.username || parsed.password) return false;
-  void shell.openExternal(parsed.toString()).catch(() => {});
+  const window = from === undefined || from === 'user' ? null : from;
+  const clicked = from === 'user' || (window !== null && !window.isDestroyed() && takeUserGesture(window));
+  const times = (window ? unclicked.get(window) : unclickedOwn) ?? [];
+  const now = Date.now();
+  const recent = times.filter((at) => now - at < UNCLICKED_OPEN_MS);
+  if (!externalOpenAllowed(parsed, clicked, recent.length)) return false;
+  if (!clicked) {
+    recent.push(now);
+    if (window) unclicked.set(window, recent);
+    else unclickedOwn.splice(0, unclickedOwn.length, ...recent);
+  }
+  void shell.openExternal(parsed!.toString()).catch(() => {});
   return true;
 }
 
@@ -111,7 +128,8 @@ function handleWindowOpen(contents: WebContents, options: GuardOptions) {
       windows.open({ type, key, url });
       return { action: 'deny' };
     }
-    openExternally(url);
+    // A link the user clicked is a click main saw; a script's window.open isn't.
+    openExternally(url, contents);
     return { action: 'deny' };
   });
 
@@ -170,7 +188,7 @@ function guardNavigation(contents: WebContents, options: GuardOptions, signIn = 
     if (target && allowed(target)) return;
     event.preventDefault();
     if (!target || (sameOrigin(target, origin) && isJmapProxyPath(target.pathname))) return;
-    openExternally(url);
+    openExternally(url, contents);
     // The webmail set a flag before leaving for the provider's logout page, so
     // its own login redirect would do nothing and the window would stay stuck.
     if (looksLikeProviderLogout(target)) void contents.loadURL(`${origin}/`).catch(() => {});
@@ -188,6 +206,8 @@ function guardNavigation(contents: WebContents, options: GuardOptions, signIn = 
 }
 
 function guardContents(contents: WebContents, options: GuardOptions, signIn = false): void {
+  // A link opens another program only on a click main saw reach this window (openExternally).
+  watchUserGestures(contents);
   handleWindowOpen(contents, options);
   guardNavigation(contents, options, signIn);
 }

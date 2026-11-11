@@ -9,7 +9,7 @@ import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { expect, test } from '@playwright/test';
 import { fingerprintOf, generateCertificate } from '../src/main/cert';
-import { isJmapProxyPath, isSsoStart, looksLikeProviderLogout } from '../src/main/navigation-rules';
+import { externalOpenAllowed, isJmapProxyPath, isSsoStart, looksLikeProviderLogout, parse, UNCLICKED_OPEN_MAX, UNCLICKED_OPEN_MS } from '../src/main/navigation-rules';
 import { isPrivateAddress, isPrivateHost, isRealHostname, serverOrigin } from '../src/main/server-address';
 import { CorsInjector } from '../src/main/cors';
 import { pluginFacts, pluginPrompt, type PromptText } from '../src/main/plugin-prompt';
@@ -188,6 +188,29 @@ test.describe('navigation rules', () => {
     expect(looksLikeProviderLogout(new URL('https://idp.example/x?id_token_hint=abc'))).toBe(true);
     expect(looksLikeProviderLogout(new URL('https://idp.example/end_session'))).toBe(true);
     expect(looksLikeProviderLogout(new URL('https://example.com/about'))).toBe(false);
+  });
+
+  test('which addresses go to another program, with a click and without one', () => {
+    const decide = (url: string, clicked: boolean, recent = 0) => externalOpenAllowed(parse(url), clicked, recent);
+    // Web addresses: on a click, and without one only while the window's last ten seconds hold fewer than five.
+    for (const url of ['https://example.org/', 'http://example.org/']) {
+      expect(decide(url, true, UNCLICKED_OPEN_MAX), url).toBe(true);
+      expect(decide(url, false, 0), url).toBe(true);
+      expect(decide(url, false, UNCLICKED_OPEN_MAX - 1), url).toBe(true);
+      expect(decide(url, false, UNCLICKED_OPEN_MAX), url).toBe(false);
+    }
+    expect(UNCLICKED_OPEN_MAX).toBe(5);
+    expect(UNCLICKED_OPEN_MS).toBe(10_000);
+    // Mail, phone, text and calendar: on a click only, upper case as lower.
+    for (const url of ['mailto:a@example.org', 'MAILTO:a@example.org', 'tel:+4912345', 'sms:+4912345', 'webcal://example.org/c.ics']) {
+      expect(decide(url, true), url).toBe(true);
+      expect(decide(url, false), url).toBe(false);
+    }
+    // Everything else never, nor an address with a user name or password in it.
+    for (const url of ['xmpp:a@example.org', 'file:///C:/x', 'ms-msdt:x', 'search-ms:x', 'bulwark://x', 'javascript:1', 'https://user@example.org/', 'https://user:secret@example.org/', 'webcal://user@example.org/c.ics', 'not a url']) {
+      expect(decide(url, true), url).toBe(false);
+      expect(decide(url, false), url).toBe(false);
+    }
   });
 });
 

@@ -148,8 +148,9 @@ export function registerBridge(ctx: FeatureContext, options: IpcOptions): void {
   // The page asked first (its own question window). False where a policy forces the connection.
   ctx.handle(CHANNEL.menuChangeConnection, () => ctx.menu.changeConnection());
 
-  ctx.on(CHANNEL.shellOpenExternal, (_event, _window, url) => {
-    if (typeof url === 'string') openExternally(url);
+  // Its window's click decides, as for a link: main takes the gesture (openExternally).
+  ctx.on(CHANNEL.shellOpenExternal, (event, _window, url) => {
+    if (typeof url === 'string') openExternally(url, event.sender);
   });
 
   ctx.on(CHANNEL.lifecycleRegister, (_event, window, wants) => {

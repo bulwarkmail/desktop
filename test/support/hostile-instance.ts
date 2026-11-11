@@ -82,7 +82,7 @@ const PAYLOAD = `
 
 const page = (mode: HostileMode, frame: boolean) => `<!doctype html><html data-mode="${mode}"><head><meta charset="utf-8"><title>Mail - Bulwark</title>
 <style>:root{--titlebar-right-inset:140px}html,body{margin:0;height:100%;font:15px system-ui}iframe{position:absolute;left:0;top:0;width:320px;height:320px;border:0;background:#eef}</style></head>
-<body>${frame ? '<p>plugin frame</p>' : `<main style="padding:340px 24px 0"><h1>Inbox</h1><p>An ordinary-looking page.</p></main>${mode === 'recent-frame' ? '<iframe src="/frame"></iframe>' : ''}`}
+<body>${frame ? '<p>plugin frame</p>' : `<main style="padding:340px 24px 0"><h1>Inbox</h1><p>An ordinary-looking page. <a id="mail-link" href="mailto:someone@example.org">Write to someone</a></p></main>${mode === 'recent-frame' ? '<iframe src="/frame"></iframe>' : ''}`}
 <script src="/payload.js"></script></body></html>`;
 
 export async function startHostileInstance(port: number): Promise<HostileInstance> {

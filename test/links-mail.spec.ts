@@ -4,8 +4,9 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { request as httpsRequest } from 'node:https';
 import { expect, test, type ElectronApplication, type Page } from '@playwright/test';
-import { ACCOUNT, dialogHost, ENT_PASSWORD, expectMailShown, fakeOsIntegration, fillLogin, launch, launchStandalone, removeOsTraces, removeProfile, requireAccount, shownPage, STALWARTS, tempProfile, waitForLogin } from './helpers';
+import { ACCOUNT, dialogHost, ENT_PASSWORD, expectMailShown, fakeOsIntegration, fillLogin, launch, launchStandalone, opened, removeOsTraces, removeProfile, requireAccount, shownPage, STALWARTS, tempProfile, waitForLogin } from './helpers';
 import { pageWith } from './native-helpers';
+import { startHostileInstance, type HostileInstance } from './support/hostile-instance';
 
 /**
  * Everything that opens the app from outside, end to end on a real server: mail links in
@@ -398,3 +399,67 @@ for (const { label, url: SERVER } of servers) {
     });
   });
 }
+
+test.describe('links a page hands to other programs', () => {
+  // An instance whose page opens addresses itself (test/support/hostile-instance.ts). No mail
+  // server: the system browser and every other program are stood in for (fakeOsIntegration).
+  let hostile: HostileInstance;
+  test.beforeAll(async () => {
+    hostile = await startHostileInstance(3844);
+  });
+  test.afterAll(() => hostile?.close());
+
+  test('with no click only web addresses open, five in ten seconds; mail, phone, text and calendar need a click; nothing else ever', async () => {
+    test.setTimeout(180_000);
+    const lootOf = (kind: string) => hostile.loot.filter((entry) => entry.kind === kind);
+    const profile = tempProfile('links-rules');
+    hostile.loot.length = 0;
+    hostile.mode = 'idle';
+    const app = await launch(profile, `--instance=${hostile.origin}/`, '--ignore-certificate-errors', '--bulwark-test-no-native');
+    try {
+      const page = await shownPage(app);
+      await app.evaluate(({ app: electronApp }) => {
+        electronApp.relaunch = () => undefined;
+      });
+      await fakeOsIntegration(app, 1);
+      // On load, eight addresses and no click.
+      hostile.mode = 'open-external';
+      await page.reload();
+      await expect.poll(() => lootOf('open-external-called').length).toBe(1);
+      const firstAt = Date.now();
+      await page.waitForTimeout(500);
+      expect(await opened(app)).toEqual(['https://attacker.example/landing']);
+
+      const call = (url: string) => page.evaluate((address) => (window as unknown as { bulwarkDesktop: { shell: { openExternal: (u: string) => void } } }).bulwarkDesktop.shell.openExternal(address), url);
+      const clickThen = async (url: string) => {
+        await page.mouse.click(400, 500);
+        await call(url);
+      };
+      for (const url of ['MAILTO:a@example.org', 'tel:+4912345', 'sms:+4912345', 'webcal://example.org/c.ics', 'xmpp:a@example.org', 'webcal://user@example.org/c.ics']) await clickThen(url);
+      await call('mailto:b@example.org');
+      await call('tel:+4999');
+      await page.waitForTimeout(500);
+      expect((await opened(app)).slice(1)).toEqual(['mailto:a@example.org', 'tel:+4912345', 'sms:+4912345', 'webcal://example.org/c.ics']);
+
+      // A mail link the user clicks on the page goes the same way, on that click. The mouse, as
+      // a locator's click would wait for a navigation the guard stops.
+      const link = (await page.locator('#mail-link').boundingBox())!;
+      await page.mouse.click(link.x + link.width / 2, link.y + link.height / 2);
+      await expect.poll(() => opened(app)).toContain('mailto:someone@example.org');
+
+      // Web addresses with no click, once the first one's ten seconds are over: five, not six,
+      // and one more after another ten seconds.
+      await page.waitForTimeout(Math.max(0, firstAt + 10_500 - Date.now()));
+      const before = (await opened(app)).length;
+      for (let n = 1; n <= 6; n += 1) await call(`https://example.org/${n}`);
+      await page.waitForTimeout(500);
+      expect((await opened(app)).slice(before)).toEqual([1, 2, 3, 4, 5].map((n) => `https://example.org/${n}`));
+      await page.waitForTimeout(10_500);
+      await call('https://example.org/7');
+      await expect.poll(() => opened(app)).toContain('https://example.org/7');
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+});

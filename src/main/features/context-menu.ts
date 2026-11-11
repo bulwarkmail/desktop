@@ -145,12 +145,16 @@ export const contextMenuFeature: Feature = {
     const pendingImages = new Set<string>();
     guardImageDownload(session, pendingImages);
 
-    /** The page's link path where it has one: an older instance has none. */
+    /**
+     * The page's link path where it has one: an older instance has none. Open Link was picked in
+     * a menu the OS drew, which is the user's click, for the page's own call that follows too.
+     */
     const openLink = (window: BrowserWindow, url: string, text: string) => {
       if (menu.commandState(window)?.['link.check'] === true) {
+        noteUserGesture(window.webContents);
         window.webContents.send(CHANNEL.menuCommand, `link.open:${JSON.stringify({ url, text })}`);
       } else {
-        openExternally(url);
+        openExternally(url, 'user');
       }
     };
 
