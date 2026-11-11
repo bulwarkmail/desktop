@@ -22,7 +22,7 @@ import { appLockGate } from '../app-lock-gate';
 import { DriveController, type DrivePolicy, type StoredDrive } from '../files/drive-controller';
 import { helperLetters } from '../files/drive-letter';
 import { registryLetterLabels } from '../files/drive-letter-label';
-import { DRIVE_PROVIDER, driveBase } from '../files/drive-places';
+import { driveBase, driveProvider } from '../files/drive-places';
 import { driveNotice, driveSummaryChanged, setDriveHooks } from '../files/drive-hooks';
 import type { Rescued } from '../files/drive-rescue';
 import { filesRegistry } from '../files/registry';
@@ -115,7 +115,8 @@ function driveController(ctx?: Pick<FeatureContext, 'state' | 'windows' | 'showM
   controller = new DriveController({
     native: helper,
     supported: windowsBuild() >= FIRST_BUILD,
-    provider: testArgument('provider') ?? DRIVE_PROVIDER,
+    // A test build has a provider of its own even when a run doesn't name one.
+    provider: driveProvider({ chosen: testArgument('provider'), testBuild: __BULWARK_TEST_BUILD__ }),
     base: driveBase({ chosen: testArgument('drive-dir'), testBuild: __BULWARK_TEST_BUILD__, profile: app.getPath('userData'), home: homedir() }),
     profile: app.getPath('userData'),
     // Explorer shows it beside the drive. A root registered with another (the exe's, before)
