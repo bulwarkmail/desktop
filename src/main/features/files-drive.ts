@@ -117,6 +117,7 @@ function driveConsent(ctx: Pick<FeatureContext, 'state' | 'windows' | 'origin' |
     state.save();
   };
   return {
+    origin,
     has: (account) => stored().some((entry) => entry.origin === origin && (account === undefined || entry.account === account)),
     add: (account) => keep([...stored().filter((entry) => !(entry.origin === origin && entry.account === account)), { origin, account }]),
     remove: (account) => keep(stored().filter((entry) => !(entry.origin === origin && entry.account === account))),

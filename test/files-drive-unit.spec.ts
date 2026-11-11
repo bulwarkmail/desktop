@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { FilesFetchRequest } from '../src/shared/bridge';
-import { DRIVE_NO_HOLD_MS, DriveController, type StoredDrive } from '../src/main/files/drive-controller';
+import { DRIVE_NO_HOLD_MS, DRIVE_QUESTIONS_MAX, DriveController, type StoredDrive } from '../src/main/files/drive-controller';
 import { ALIGN, FetchRelay, PIECE } from '../src/main/files/drive-fetch';
 import { helperLetters, settleLetter, type LetterSystem } from '../src/main/files/drive-letter';
 import { isOurLabel, registryLetterLabels, type LetterLabel, type LetterLabelSystem } from '../src/main/files/drive-letter-label';
@@ -909,6 +909,7 @@ test.describe('turning the drive on: a click, and then the user\'s yes', () => {
       watchPins: false,
       ...(options.now ? { now: options.now } : {}),
       consent: {
+        origin: 'https://mail.example.org',
         has: (account) => (account === undefined ? yes.size > 0 : yes.has(account)),
         add: (account) => yes.add(account),
         remove: (account) => yes.delete(account),
@@ -921,6 +922,40 @@ test.describe('turning the drive on: a click, and then the user\'s yes', () => {
     });
     return { drive, base, registered, asked, yes, store, remove: () => rmSync(base, { recursive: true, force: true }) };
   }
+
+  test('after a no, the page can not put the question up again by naming another account', async () => {
+    let now = 1_000_000;
+    const { drive, asked, remove } = askingDrive([false, false, false, false, false, false], { now: () => now });
+    try {
+      expect(await drive.enable('acct-1', 'alice@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      // The account is the page's word. Five more clicks, a new name each time.
+      for (let n = 2; n <= 6; n += 1) expect(await drive.enable(`acct-${n}`, 'alice@example.org', click), `acct-${n}`).toEqual({ ok: false, error: 'cancelled' });
+      expect(asked.map((question) => question.account), 'questions inside the hold time of the first no').toEqual(['acct-1']);
+      // Once the no has run out, the server may ask again.
+      now += DRIVE_NO_HOLD_MS + 1;
+      await drive.enable('acct-7', 'alice@example.org', click);
+      expect(asked).toHaveLength(2);
+    } finally {
+      remove();
+    }
+  });
+
+  test('one server puts the question up three times at most while the app runs, yes or no', async () => {
+    let now = 1_000_000;
+    const { drive, asked, remove } = askingDrive([true, true, false, true], { now: () => now });
+    try {
+      expect((await drive.enable('acct-1', 'a@example.org', click)).ok).toBe(true);
+      expect((await drive.enable('acct-2', 'b@example.org', click)).ok).toBe(true);
+      expect(await drive.enable('acct-3', 'c@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      now += DRIVE_NO_HOLD_MS + 1;
+      expect(await drive.enable('acct-4', 'd@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      expect(asked).toHaveLength(DRIVE_QUESTIONS_MAX);
+      // The accounts that got a yes still come back with no question.
+      expect((await drive.enable('acct-1', 'a@example.org', () => false)).ok).toBe(true);
+    } finally {
+      remove();
+    }
+  });
 
   const click = () => true;
   const noClick = () => false;
@@ -967,7 +1002,8 @@ test.describe('turning the drive on: a click, and then the user\'s yes', () => {
   });
 
   test('a label with path characters, a turned-round mark or 300 characters is cleaned before the question shows it', async () => {
-    const { drive, base, asked, remove } = askingDrive([false, false, false]);
+    // Each says yes: a no would hold the question back for the next account.
+    const { drive, base, asked, remove } = askingDrive([true, true, true]);
     try {
       await drive.enable('acct-1', '..\\..\\Windows\\System32', click);
       await drive.enable('acct-2', 'x'.repeat(300), click);

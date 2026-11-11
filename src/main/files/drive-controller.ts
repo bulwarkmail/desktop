@@ -7,8 +7,10 @@
  * - Turned on (`enable`): the first time for a server and account it needs a real click and
  *   the user's yes to main's own question, which names the server and the folder (`consent`).
  *   After that the wish is kept, and the page turns it on again after each sign-in without
- *   either. A no holds for a while. Never before a sign-in: at a start nothing registers or
- *   connects until the page asks. Turned off by the user, it asks again the next time.
+ *   either. A no holds for a while for the server, whatever account the page names next, and
+ *   one server puts the question up at most three times while the app runs. Never before a
+ *   sign-in: at a start nothing registers or connects until the page asks. Turned off by the
+ *   user, it asks again the next time.
  * - Turned off (`disable`): the sync root goes, with its folder. What was written here and isn't
  *   in Files yet is copied to `Documents\Bulwark – not uploaded\<date>` first (drive-rescue.ts);
  *   only a wipe deletes without that. `signed-out` keeps the wish and the pins, so the next
@@ -170,6 +172,8 @@ export interface DriveDeps {
 }
 
 export interface DriveConsent {
+  /** The server the yes is for, as the app knows it (scheme, host and port), never the page's word. */
+  origin: string;
   /** A yes for this account; with none, a yes for any account of this server. */
   has(account?: string): boolean;
   add(account: string): void;
@@ -179,8 +183,13 @@ export interface DriveConsent {
   ask(account: string, label: string, folder: string): Promise<boolean>;
 }
 
-/** How long a no to the question holds for an account: the page can't ask again before. */
+/**
+ * How long a no to the question holds for the server, whatever account the page names next:
+ * the account is the page's word, and a new name each time would ask again each time.
+ */
 export const DRIVE_NO_HOLD_MS = 10 * 60_000;
+/** How many times one server may put the question up while the app runs; after that it asks no more. */
+export const DRIVE_QUESTIONS_MAX = 3;
 
 /** Without the helper's call there's nothing that sets the attribute. */
 const noPin = async (): Promise<boolean> => false;
@@ -234,8 +243,10 @@ export class DriveController {
   private readonly statuses = new Map<string, FilesDriveStatus>();
   /** Serving Explorer's status: null until tried, false where Windows has none or it failed. */
   private statusServed: boolean | null = null;
-  /** Per account, until when a no to the question holds. */
+  /** Per server, until when a no to the question holds. */
   private readonly refusedUntil = new Map<string, number>();
+  /** Per server, how many times the question was put up while the app runs. */
+  private readonly questionsAsked = new Map<string, number>();
 
   constructor(private readonly deps: DriveDeps) {
     this.warn = deps.warn ?? console.warn;
@@ -350,15 +361,20 @@ export class DriveController {
       if (!stored || (consent && !consent.has(account))) {
         if (!gesture()) return fail('gesture');
         if (consent && !consent.has(account)) {
-          if ((this.refusedUntil.get(account) ?? 0) > this.now()) return fail('cancelled');
+          // Held per server, not per account: the page names the account.
+          const { origin } = consent;
+          if ((this.refusedUntil.get(origin) ?? 0) > this.now()) return fail('cancelled');
+          const asked = this.questionsAsked.get(origin) ?? 0;
+          if (asked >= DRIVE_QUESTIONS_MAX) return fail('cancelled');
+          this.questionsAsked.set(origin, asked + 1);
           const folder = path.win32.join(this.base(), this.folderNameOf(account, label, stored));
           const yes = await consent.ask(account, label, folder).then((answer) => answer === true, () => false);
           if (!yes) {
-            this.refusedUntil.set(account, this.now() + DRIVE_NO_HOLD_MS);
+            this.refusedUntil.set(origin, this.now() + DRIVE_NO_HOLD_MS);
             return fail('cancelled');
           }
           consent.add(account);
-          this.refusedUntil.delete(account);
+          this.refusedUntil.delete(origin);
           // Turned off while it asked.
           if (this.deps.policy().forcedOff) return fail('policy');
         }
