@@ -14,8 +14,10 @@ import {
   folderNameFor,
   driveBase,
   freeLetters,
+  keyOfRoot,
   letterTarget,
   nativeStatusOf,
+  profileKey,
   relativeParts,
   resolveUnder,
   rootKey,
@@ -726,14 +728,14 @@ test.describe("another profile's Files drive", () => {
     for (const base of bases.splice(0)) rmSync(base, { recursive: true, force: true });
   });
 
-  function profileDrive(native: NativeFilesModule, profile: string, options: { stored?: StoredDrive; letters?: LetterSystem; letterLabels?: LetterLabelSystem; policyLetter?: string | null; icon?: string } = {}) {
+  function profileDrive(native: NativeFilesModule, profile: string, options: { stored?: StoredDrive; letters?: LetterSystem; letterLabels?: LetterLabelSystem; policyLetter?: string | null; icon?: string; provider?: string } = {}) {
     const base = mkdtempSync(path.join(tmpdir(), 'bw-drive-profiles-'));
     bases.push(base);
     const store = { value: options.stored ?? ({} as StoredDrive) };
     const drive = new DriveController({
       native,
       supported: true,
-      provider: PROVIDER,
+      provider: options.provider ?? PROVIDER,
       base,
       profile,
       icon: options.icon ?? TEST_ICON,
@@ -861,6 +863,56 @@ test.describe("another profile's Files drive", () => {
     expect(labels.get('Q')).toEqual(theirs);
     expect(map.get('Q')).toBe(path.win32.join(HOME, 'Bulwark Files', 'user@example.org'));
     expect(events.filter((event) => event.endsWith(' Q'))).toEqual([]);
+  });
+
+  test('the account part of an id is two hex runs and a dash, whatever the account is called', () => {
+    for (const account of ['a-b', 'a!b', `${profileKey(INSTALLED)}-${accountKey(INSTALLED, 'x')}`, 'Bulwark!S-1-5!x', '', 'ä'.repeat(200), '../..', 'a\0b']) {
+      expect(rootKey(OTHER, account)).toMatch(/^[0-9a-f]{16}-[0-9a-f]{24}$/);
+      expect(rootKey(OTHER, account).startsWith(`${profileKey(OTHER)}-`)).toBe(true);
+      expect(rootKey(OTHER, account).startsWith(`${profileKey(INSTALLED)}-`)).toBe(false);
+    }
+    // Two accounts whose names differ only around a dash don't share an id.
+    expect(rootKey(OTHER, 'a-b')).not.toBe(rootKey(OTHER, 'a'));
+    expect(rootKey(OTHER, 'a-b')).not.toBe(rootKey(OTHER, 'b'));
+  });
+
+  test("an account named after another profile's root id gets an id of its own, and turning it off leaves the other root", async () => {
+    const installedNew = { id: `${PROVIDER}!${SID}!${rootKey(INSTALLED, 'user@example.org')}`, path: 'C:\\Users\\someone\\Bulwark Files\\user@example.org', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const installedOld = { id: `${PROVIDER}!${SID}!${accountKey(INSTALLED, 'user@example.org')}`, path: 'C:\\Users\\someone\\Bulwark Files\\old', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const { registered, calls, native } = world([installedNew, installedOld]);
+    const { drive } = profileDrive(native, OTHER);
+    // The page of the second profile names its accounts after the other profile's ids.
+    for (const account of [keyOfRoot(installedNew.id), keyOfRoot(installedOld.id), installedNew.id, installedOld.id]) {
+      expect((await drive.enable(account, 'x@example.org', () => true)).ok).toBe(true);
+      await drive.disable(account, 'user');
+    }
+    await drive.startUp();
+    await drive.wipe();
+    expect(registered).toEqual([installedNew, installedOld]);
+    expect(calls.filter((call) => call.includes(installedNew.id) || call.includes(installedOld.id))).toEqual([]);
+  });
+
+  test('two profiles from before, the same account, both with ids in the older form: a start and a wipe of one leave the other', async () => {
+    const a = { id: `${PROVIDER}!${SID}!${accountKey(INSTALLED, 'acct-1')}`, path: 'C:\\a\\acct-1', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const b = { id: `${PROVIDER}!${SID}!${accountKey(OTHER, 'acct-1')}`, path: 'C:\\b\\acct-1', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const { registered, native } = world([a, b]);
+    const second = profileDrive(native, OTHER, { stored: { accounts: { 'acct-1': { label: 'a@example.org', folder: 'a@example.org', rootId: 'r1', createdAt: 1 } } } });
+    await second.drive.startUp();
+    expect(registered.map((root) => root.id)).toEqual([a.id, b.id]);
+    await second.drive.wipe();
+    expect(registered.map((root) => root.id)).toEqual([a.id]);
+  });
+
+  test("a provider whose name starts like the installed app's lists none of its roots", async () => {
+    const installed = { id: `${PROVIDER}!${SID}!${accountKey(INSTALLED, 'user@example.org')}`, path: 'C:\\x', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const other = { id: `Bulwark Test!${SID}!${rootKey(INSTALLED, 'user@example.org')}`, path: 'C:\\y', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const { registered, calls, native } = world([installed, other]);
+    // The same profile path under the test provider: only the test provider's root is its own.
+    const { drive } = profileDrive(native, INSTALLED, { provider: 'Bulwark Test' });
+    await drive.startUp();
+    await drive.wipe();
+    expect(registered.map((root) => root.id)).toEqual([installed.id]);
+    expect(calls.filter((call) => call.includes(installed.id))).toEqual([]);
   });
 });
 

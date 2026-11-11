@@ -180,4 +180,31 @@ test.describe('whether a server may see the files', () => {
     await consent.decide(B);
     expect(asked).toEqual([A, B, A, B]);
   });
+
+  test('scheme, host and port each make another server', async () => {
+    const { consent, asked } = consentWith([true, false]);
+    expect(await consent.decide('https://mail.example.org')).toBe(true);
+    for (const origin of ['http://mail.example.org', 'https://mail.example.org:8443', 'https://mail.example.org.', 'https://xn--mil-qla.example.org']) {
+      expect(consent.allowed(origin), origin).toBe(false);
+    }
+    expect(await consent.decide('https://mail.example.org:8443')).toBe(false);
+    expect(asked).toEqual(['https://mail.example.org', 'https://mail.example.org:8443']);
+  });
+
+  test('a no for one server neither answers nor holds for another, and calls at once for one server ask once', async () => {
+    const { consent, asked } = consentWith([false, true]);
+    expect(await Promise.all([consent.decide(A), consent.decide(A), consent.decide(A)])).toEqual([false, false, false]);
+    expect(asked).toEqual([A]);
+    expect(await consent.decide(B)).toBe(true);
+    expect(consent.allowed(A)).toBe(false);
+  });
+
+  test('a yes taken back while the question for another server is up stays taken back', async () => {
+    const { consent } = consentWith([true, true]);
+    expect(await consent.decide(A)).toBe(true);
+    const pending = consent.decide(B);
+    consent.forget(A);
+    expect(await pending).toBe(true);
+    expect(consent.allowed(A)).toBe(false);
+  });
 });

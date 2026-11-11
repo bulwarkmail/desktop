@@ -8,13 +8,14 @@
 // to it (writing one looks the target up): it's written to a share on this computer and
 // the host's text is changed in the file afterwards.
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, truncateSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, truncateSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test, type ElectronApplication, type Page } from '@playwright/test';
-import { fakeOsIntegration, launch, prompts, removeProfile, shownPage, tempProfile, waitForLogin } from './helpers';
+import { askInWindows, fakeOsIntegration, launch, prompts, removeProfile, shownPage, tempProfile, waitForLogin } from './helpers';
 import { startHostileInstance, type HostileInstance } from './support/hostile-instance';
 import { startHostileInstance as startMenuInstance, type HostileInstance as MenuInstance } from './support/hostile-instance-2';
+import { startInputInstance, type InputInstance } from './support/input-instance';
 
 /** The shell's question before a server's first list, in English. */
 const ASKED_APP = 'Show the files you opened recently on this computer when you attach a file?';
@@ -446,6 +447,169 @@ test.describe('a same-origin frame running menu lines', () => {
       removeProfile(profile);
     }
   });
+});
+
+test.describe('the question before recent files, on an instance\'s page', () => {
+  // An instance's page asks for recent files at a click (test/support/input-instance.ts), on two
+  // ports of one host. The shortcuts point at files this file makes.
+  test.skip(!win, 'Windows shortcuts');
+  const NAMES = ['salary-2026.xlsx', 'passwords.txt', 'notes.txt'];
+  let first: InputInstance;
+  let second: InputInstance;
+  let root = '';
+  let recent = '';
+
+  test.beforeAll(async () => {
+    first = await startInputInstance(3847);
+    second = await startInputInstance(3848);
+    root = mkdtempSync(path.join(tmpdir(), 'bw-recent-ask-'));
+    recent = path.join(root, 'Recent');
+    mkdirSync(recent);
+    mkdirSync(path.join(root, 'Documents'));
+    for (const name of NAMES) writeFileSync(path.join(root, 'Documents', name), `FAKE-SECRET ${name}`);
+  });
+  test.afterAll(() => {
+    first?.close();
+    second?.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+  });
+
+  const lootOf = (instance: InputInstance, kind: string) => instance.loot.filter((entry) => entry.kind === kind).map((entry) => entry.body);
+  const askedFor = (host: string) => `Let ${host} see the files you opened recently on this computer?`;
+
+  /** The page in `mode` at `address`, three recent files to find, no lock, every question answered with `answer`. */
+  async function openInstance(instance: InputInstance, profile: string, mode: InputInstance['mode'], answer: number, address = `${instance.origin}/`): Promise<{ app: ElectronApplication; page: Page }> {
+    instance.loot.length = 0;
+    instance.mode = 'idle';
+    const app = await launch(profile, `--instance=${address}`, '--ignore-certificate-errors', '--bulwark-test-no-native', `--bulwark-test-recent-dir=${recent}`);
+    const page = await shownPage(app);
+    await app.evaluate(({ app: electronApp, shell }) => {
+      electronApp.relaunch = () => undefined;
+      shell.openPath = async () => '';
+      shell.showItemInFolder = () => undefined;
+    });
+    await fakeOsIntegration(app, answer);
+    const made = await app.evaluate(({ shell }, list) => list.map(([lnk, target]) => shell.writeShortcutLink(lnk, 'create', { target })), NAMES.map((name) => [path.join(recent, `${name}.lnk`), path.join(root, 'Documents', name)]));
+    expect(made).toEqual([true, true, true]);
+    NAMES.forEach((name, index) => {
+      const at = (Date.now() - (index + 1) * 60_000) / 1000;
+      utimesSync(path.join(recent, `${name}.lnk`), at, at);
+    });
+    await expect.poll(() => lootOf(instance, 'bridge').length).toBeGreaterThan(0);
+    await expect.poll(() => app.evaluate(() => (globalThis as unknown as { __bulwarkOs: { hub: { locked: boolean } } }).__bulwarkOs.hub.locked), { timeout: 30_000 }).toBe(false);
+    instance.loot.length = 0;
+    instance.mode = mode;
+    await page.reload();
+    return { app, page };
+  }
+
+  test('a no holds through a reload, the question is the shell\'s, and its safe button is the default', async () => {
+    const profile = tempProfile('recent-ask-no');
+    const { app, page } = await openInstance(first, profile, 'recent-each-click', 1);
+    try {
+      await expect.poll(() => lootOf(first, 'ready').length, { timeout: 30_000 }).toBe(1);
+      await page.mouse.click(400, 500);
+      await expect.poll(() => lootOf(first, 'recent').length, { timeout: 20_000 }).toBe(1);
+      expect(lootOf(first, 'recent')[0]).toEqual({ ok: false, reason: 'gesture' });
+      const asked = (await prompts(app)) as unknown as { message: string; buttons: string[]; defaultId: number; cancelId: number }[];
+      expect(asked).toHaveLength(1);
+      expect(asked[0].message).toBe(askedFor(new URL(first.origin).host));
+      expect(asked[0].buttons).toEqual(['Show recent files', "Don't allow"]);
+      expect(asked[0].defaultId).toBe(1);
+      expect(asked[0].cancelId).toBe(1);
+      // The page loads again and asks at each of three more clicks: no question.
+      await page.reload();
+      await expect.poll(() => lootOf(first, 'ready').length, { timeout: 30_000 }).toBe(2);
+      for (let click = 0; click < 3; click += 1) {
+        await page.mouse.click(400, 500);
+        await page.waitForTimeout(600);
+      }
+      expect(await prompts(app)).toHaveLength(1);
+      expect(JSON.stringify(first.loot)).not.toContain('salary');
+      const state = path.join(profile, 'shell-state.json');
+      if (existsSync(state)) expect(JSON.parse(readFileSync(state, 'utf8')).recentFilesOrigins ?? []).toEqual([]);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('a yes is for that scheme, host and port; after it one click is one list or one file', async () => {
+    test.setTimeout(240_000);
+    const profile = tempProfile('recent-ask-yes');
+    let { app, page } = await openInstance(first, profile, 'recent-two-on-one', 0);
+    try {
+      await expect.poll(() => lootOf(first, 'ready').length, { timeout: 30_000 }).toBe(1);
+      await page.mouse.click(400, 500);
+      await expect.poll(() => lootOf(first, 'first-click').length, { timeout: 20_000 }).toBe(1);
+      // The list took the click: the file the page asks for on it is refused.
+      expect(lootOf(first, 'first-click')[0]).toEqual({ list: true, names: 3, attachOnSameClick: 'gesture' });
+      expect(await prompts(app)).toHaveLength(1);
+      await page.mouse.click(400, 500);
+      await expect.poll(() => lootOf(first, 'second-click').length, { timeout: 20_000 }).toBe(1);
+      expect(lootOf(first, 'second-click')[0]).toEqual({ one: 'ok', two: 'gesture' });
+      await app.close();
+      const state = JSON.parse(readFileSync(path.join(profile, 'shell-state.json'), 'utf8')) as { recentFilesOrigins?: string[] };
+      expect(state.recentFilesOrigins).toEqual([first.origin]);
+
+      // The same profile on another port of the same host: asked again, and a no there.
+      ({ app, page } = await openInstance(second, profile, 'recent-each-click', 1));
+      await expect.poll(() => lootOf(second, 'ready').length, { timeout: 30_000 }).toBe(1);
+      await page.mouse.click(400, 500);
+      await expect.poll(() => lootOf(second, 'recent').length, { timeout: 20_000 }).toBe(1);
+      expect(lootOf(second, 'recent')[0]).toEqual({ ok: false, reason: 'gesture' });
+      expect((await prompts(app)).map((asked) => asked.message)).toEqual([askedFor(new URL(second.origin).host)]);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  // The question as the shell draws it, in a window of its own: for a long name that starts like
+  // a trusted one, and for one whose first letter is Cyrillic.
+  const LONG = `mail.example.com.${'a'.repeat(60)}.${'b'.repeat(60)}.${'c'.repeat(60)}.evil-domain.localhost`;
+  const LOOKALIKE = 'аpple.localhost';
+  for (const [name, host, end] of [['a long', LONG, '.evil-domain.localhost:3847'], ['a look-alike', LOOKALIKE, 'xn--pple-43d.localhost:3847']] as const) {
+    test(`the question for ${name} name shows the end of the name on screen, and its safe button has the keys`, async () => {
+      const profile = tempProfile('recent-ask-host');
+      const { app, page } = await openInstance(first, profile, 'recent-each-click', 1, `https://${host}:3847/`);
+      try {
+        await askInWindows(app, true);
+        await expect.poll(() => lootOf(first, 'ready').length, { timeout: 30_000 }).toBe(1);
+        await page.mouse.click(400, 500);
+        let dialog: Page | undefined;
+        await expect.poll(() => {
+          dialog = app.windows().find((other) => other !== page && !other.isClosed() && other.url().startsWith('data:'));
+          return Boolean(dialog);
+        }, { timeout: 20_000 }).toBe(true);
+        await dialog!.waitForFunction(() => document.querySelector('#title')?.textContent);
+        await dialog!.waitForTimeout(500);
+        const facts = await dialog!.evaluate((tail) => {
+          const title = document.querySelector('#title') as HTMLElement;
+          const node = [...title.childNodes].find((child) => child.nodeType === Node.TEXT_NODE && (child.textContent ?? '').includes(tail)) ?? title.firstChild!;
+          const at = (node.textContent ?? '').lastIndexOf(tail);
+          const range = document.createRange();
+          range.setStart(node, Math.max(0, at));
+          range.setEnd(node, Math.max(0, at) + tail.length);
+          const part = range.getBoundingClientRect();
+          const box = title.getBoundingClientRect();
+          return {
+            title: title.textContent ?? '',
+            endInView: part.bottom <= box.bottom + 1 && part.top >= box.top - 1,
+            focused: document.activeElement?.textContent ?? null,
+          };
+        }, end);
+        expect(facts.title).toContain(end);
+        expect(facts.endInView, `the end of the name is on screen without scrolling: ${facts.title}`).toBe(true);
+        expect(facts.focused, 'the button that has the keys').toBe("Don't allow");
+        await dialog!.locator('button.button', { hasText: "Don't allow" }).click();
+        await expect.poll(() => lootOf(first, 'recent')).toEqual([{ ok: false, reason: 'gesture' }]);
+      } finally {
+        await app.close().catch(() => {});
+        removeProfile(profile);
+      }
+    });
+  }
 });
 
 test.describe('the RecentFilesInAttach policy', () => {

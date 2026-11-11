@@ -192,7 +192,7 @@ test.describe('navigation rules', () => {
 
   test('which addresses go to another program, with a click and without one', () => {
     const decide = (url: string, clicked: boolean, recent = 0) => externalOpenAllowed(parse(url), clicked, recent);
-    // Web addresses: on a click, and without one only while the window's last ten seconds hold fewer than five.
+    // Web addresses: on a click, and without one only while the app's last ten seconds for the server hold fewer than five.
     for (const url of ['https://example.org/', 'http://example.org/']) {
       expect(decide(url, true, UNCLICKED_OPEN_MAX), url).toBe(true);
       expect(decide(url, false, 0), url).toBe(true);
@@ -211,6 +211,43 @@ test.describe('navigation rules', () => {
       expect(decide(url, true), url).toBe(false);
       expect(decide(url, false), url).toBe(false);
     }
+  });
+
+  test('schemes around the list never go to another program, click or not', () => {
+    for (const url of [
+      'webcals://example.org/c.ics', 'ms-settings:privacy', 'ms-msdt:/id x', 'search-ms:query=x', 'ms-word:ofe|u|https://example.org/x.docx',
+      'file:///C:/Windows/System32/calc.exe', 'file://server/share/x', 'smb://server/share', '\\\\server\\share\\x.lnk', '//server/share',
+      'javascript:alert(1)', 'data:text/html,<script>1</script>', 'vbscript:msgbox(1)', 'blob:https://example.org/1', 'about:blank',
+      'tel :+4912345', 'tel%3A+4912345', 'xmpp:a@example.org', 'bulwark://open', 'callto:+4912345', 'facetime:a@example.org', 'skype:a?call',
+      'mailto', 'mailto//a@example.org', 'view-source:https://example.org', 'chrome://settings', 'ftp://example.org/x',
+    ]) {
+      expect.soft(externalOpenAllowed(parse(url), true, 0), `${url} with a click`).toBe(false);
+      expect.soft(externalOpenAllowed(parse(url), false, 0), `${url} without`).toBe(false);
+    }
+  });
+
+  test('odd spellings of mail, phone, text and calendar addresses need the click all the same', () => {
+    for (const url of ['MAILTO:a@example.org', 'MailTo:a@example.org?subject=x', ' mailto:a@example.org', 'mail\tto:a@example.org', 'TEL:+4912345', 'tel:+49 123 45', 'sms:+4912345?body=x', 'WEBCAL://Example.org/c.ics', 'webcal:example.org/c.ics']) {
+      expect.soft(externalOpenAllowed(parse(url), false, 0), `${url} without a click`).toBe(false);
+      expect.soft(externalOpenAllowed(parse(url), true, 0), `${url} with a click`).toBe(true);
+    }
+  });
+
+  test('a user name or a password in any address keeps it in the app, click or not', () => {
+    for (const url of ['https://user@example.org/', 'https://user:pw@example.org/', 'http://:pw@example.org/', 'webcal://user@example.org/c.ics', 'https://example.org@evil.example/']) {
+      expect.soft(externalOpenAllowed(parse(url), true, 0), `${url} with a click`).toBe(false);
+      expect.soft(externalOpenAllowed(parse(url), false, 0), `${url} without`).toBe(false);
+    }
+    // Percent-encoded, it is no user name: one odd host, which the URL parser refuses or keeps as a host.
+    const encoded = parse('https://example.org%40evil.example/');
+    expect(encoded === null || encoded.username === '').toBe(true);
+  });
+
+  test('the limit: the fifth web address without a click opens, the sixth and any later one do not', () => {
+    for (const recent of [0, 1, 4]) expect(externalOpenAllowed(parse('https://example.org/'), false, recent)).toBe(true);
+    for (const recent of [5, 6, 1000, Number.MAX_SAFE_INTEGER]) expect(externalOpenAllowed(parse('https://example.org/'), false, recent)).toBe(false);
+    expect(externalOpenAllowed(parse('https://example.org/'), false, Number.NaN), 'a count that is no number').toBe(false);
+    expect(externalOpenAllowed(parse('https://example.org/'), true, 1000)).toBe(true);
   });
 
   test('a question names a long server by the end that says whose it is, shortened in the middle of the left-hand part', () => {

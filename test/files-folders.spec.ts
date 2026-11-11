@@ -138,6 +138,9 @@ test('adding a folder takes a real click, and the same folder twice overlaps', a
   const added = await clicked<Answer<Root>>('addFolder', request);
   expect(added.ok).toBe(true);
   expect(added.value).toMatchObject({ kind: 'folder', account: 'acct-1', path: sync, remoteId: 'node-7', remoteLabel: 'Projects', paused: false });
+  // The click went into adding the folder: nothing is left of it to open Explorer with.
+  expect(await files<boolean>(page, 'showInFolder', added.value!.id, '')).toBe(false);
+  expect(await mainGlobal<string[]>('__shown')).toEqual([]);
   expect((await files<Root[]>(page, 'roots')).map((root) => root.id)).toEqual([added.value!.id]);
   expect(await clicked<Answer>('addFolder', { ...request, account: 'acct-2' })).toEqual({ ok: false, error: 'overlap' });
   mkdirSync(path.join(sync, 'inner'));
@@ -232,6 +235,9 @@ test('write, read, move and remove go round, and the watcher reports what change
   expect(await mainGlobal<string[]>('__shown')).toEqual([]);
   expect(await clicked<boolean>('showInFolder', root.id, 'docs/A.txt')).toBe(true);
   expect(await mainGlobal<string[]>('__shown')).toEqual([path.join(root.path, 'docs', 'A.txt')]);
+  // One click, one Explorer window: the next call on the same click opens nothing.
+  expect(await files<boolean>(page, 'showInFolder', root.id, '')).toBe(false);
+  expect(await mainGlobal<string[]>('__shown')).toHaveLength(1);
 
   expect(await files<Answer>(page, 'remove', root.id, 'docs/A.txt', { ...expectOf(moved.value!), size: 99 })).toEqual({ ok: false, error: 'changed' });
   expect(await files<Answer>(page, 'remove', root.id, 'docs/A.txt', expectOf(moved.value!))).toEqual({ ok: true, value: 'trash' });

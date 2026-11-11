@@ -523,4 +523,20 @@ test.describe('links on a page used with the keyboard, and pop-ups', () => {
       removeProfile(profile);
     }
   });
+
+  test('a phone link in a mail framed as the webmail frames it opens on the click, handed over by the page or by itself', async () => {
+    const profile = tempProfile('links-frame');
+    const { app, page } = await openInstance(profile, 'mail-frame');
+    try {
+      await expect.poll(() => instance.loot.filter((entry) => entry.kind === 'ready').length, { timeout: 30_000 }).toBe(1);
+      // The first link: the page hands it to the shell on the click. The second opens by itself.
+      await page.mouse.click(60, 40);
+      await expect.poll(() => opened(app), { timeout: 10_000 }).toContain('tel:+4930991');
+      await page.mouse.click(60, 120);
+      await expect.poll(() => opened(app), { timeout: 10_000 }).toContain('tel:+4930992');
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
 });

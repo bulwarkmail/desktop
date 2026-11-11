@@ -1899,10 +1899,16 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
   // An instance whose page runs lines of the bar on input (test/support/input-instance.ts).
   test.skip(process.platform !== 'win32', 'the page draws the bar on Windows and Linux; Windows here');
   let instance: InputInstance;
+  // Recent files come from this empty folder, never the user's own.
+  let recent = '';
   test.beforeAll(async () => {
     instance = await startInputInstance(3845);
+    recent = mkdtempSync(path.join(tmpdir(), 'bw-menu-input-recent-'));
   });
-  test.afterAll(() => instance?.close());
+  test.afterAll(() => {
+    instance?.close();
+    rmSync(recent, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+  });
 
   const lootOf = (kind: string) => instance.loot.filter((entry) => entry.kind === kind).map((entry) => entry.body);
   const zoomLevel = (app: ElectronApplication) => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((w) => w.isVisible())!.webContents.getZoomLevel());
@@ -1911,7 +1917,7 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
   async function openInstance(profile: string, mode: InputInstance['mode'], answer = 1): Promise<{ app: ElectronApplication; page: Page }> {
     instance.loot.length = 0;
     instance.mode = 'idle';
-    const app = await launch(profile, `--instance=${instance.origin}/`, '--ignore-certificate-errors', '--bulwark-test-no-native');
+    const app = await launch(profile, `--instance=${instance.origin}/`, '--ignore-certificate-errors', '--bulwark-test-no-native', `--bulwark-test-recent-dir=${recent}`);
     const page = await shownPage(app);
     await app.evaluate(({ app: electronApp, shell }) => {
       electronApp.relaunch = () => undefined;
@@ -1935,6 +1941,26 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
     await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk });
     await cdp.detach();
   }
+
+  test('what a script makes that looks like input is no click: no menu line, no recent files, no activation, no link to another program', async () => {
+    const profile = tempProfile('menu-synthetic');
+    // Every question would be answered yes: only the missing click stands in the way.
+    const { app } = await openInstance(profile, 'synthetic', 0);
+    try {
+      const before = await zoomLevel(app);
+      await expect.poll(() => lootOf('synthetic-done').length, { timeout: 90_000 }).toBe(1);
+      const out = lootOf('synthetic-done')[0] as Record<string, unknown>;
+      for (const name of ['mouse', 'elementClick', 'keyEnter', 'keySpace', 'accessKey', 'submit', 'focusBlur', 'touch']) {
+        expect.soft(out[name], name).toEqual({ list: { ok: false, reason: 'gesture' }, active: false });
+      }
+      expect.soft(await zoomLevel(app), 'zoomed by a menu line').toBe(before);
+      expect.soft(await opened(app), 'handed to other programs').toEqual([]);
+      expect.soft(await prompts(app), 'questions asked').toEqual([]);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
 
   test('from the keyboard: Enter and Space run the line, a letter and an arrow do not', async () => {
     const profile = tempProfile('menu-keys');
