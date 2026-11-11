@@ -33,6 +33,9 @@ export interface NativeCertificate {
   askEachUse: boolean;
 }
 
+/** What Windows' print dialog came to. `unavailable` and `invalid`: no dialog was shown. */
+export type WindowsPrintResult = 'printed' | 'cancelled' | 'failed' | 'unavailable' | 'invalid';
+
 export type HelloResult = 'verified' | 'cancelled' | 'busy' | 'unavailable' | 'timeout' | 'invalid' | 'failed';
 
 /** What a Hello key credential's create or sign answers. `ok` is the only yes. */
@@ -252,6 +255,8 @@ export interface DriveLetters {
 
 /** Every export of the helper. test/native.spec.ts holds the binary to this list. */
 export interface NativeModule extends Partial<NativeFilesModule>, Partial<NativeSystemModule> {
+  /** Optional: a helper built before it has none, and the app's own print window shows instead. */
+  printDialog?(hwnd: Buffer, pdf: Buffer, landscape: Buffer | undefined, title: string): Promise<WindowsPrintResult>;
   helloAvailable(): Promise<boolean>;
   helloVerify(reason: string, hwnd: Buffer, timeoutMs: number): Promise<HelloResult>;
   // Optional: a helper built before these existed still loads, and Hello's key credential is unavailable.
@@ -437,6 +442,11 @@ export interface NativeHelper {
   };
   /** The Files drive's calls, on Windows with a helper that has them. Null elsewhere. */
   files: NativeFilesModule | null;
+  /**
+   * Windows' print dialog with the document's pages in its preview. Null off Windows and without
+   * a helper that has it. Never throws: anything wrong is `unavailable`.
+   */
+  print: { dialog(windowHandle: Buffer, pdf: Uint8Array, landscape: Uint8Array | null, title: string): Promise<WindowsPrintResult> } | null;
   /**
    * Windows, in place of its own tools. Without the helper or the call, each answers what its
    * caller got when the tool failed. Only `registry.read` throws.
@@ -647,6 +657,19 @@ export function wrapHelper(
       },
     },
     files: platform === 'win32' && native && FILES_NATIVE_EXPORTS.every((name) => typeof native[name] === 'function') ? (native as NativeFilesModule) : null,
+    print:
+      platform === 'win32' && typeof native?.printDialog === 'function'
+        ? {
+            dialog: async (windowHandle, pdf, landscape, title) => {
+              try {
+                return await native.printDialog!(windowHandle, Buffer.from(pdf), landscape ? Buffer.from(landscape) : undefined, title);
+              } catch (error) {
+                warn(`Windows' print dialog: ${(error as Error)?.message ?? error}`);
+                return 'unavailable';
+              }
+            },
+          }
+        : null,
     system: {
       registry: platform === 'win32' ? registryFrom(native, warn) : null,
       quietState: async () => {

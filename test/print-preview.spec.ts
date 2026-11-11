@@ -462,3 +462,74 @@ test('with printing off by policy no preview opens', async () => {
   expect(await jobs()).toEqual([]);
   expect(await opened(app)).toEqual([]);
 });
+
+test.describe('on Windows, Windows’ own print dialog', () => {
+  test.skip(process.platform !== 'win32', 'Windows only');
+
+  /** Windows' dialog as there, answering `answer`. */
+  async function windowsAnswers(answer: string | undefined): Promise<void> {
+    await fakePrinters();
+    await app.evaluate((_electron, value) => {
+      (globalThis as unknown as { __bulwarkFakePrinting: { windowsDialog?: string } }).__bulwarkFakePrinting.windowsDialog = value;
+    }, answer);
+  }
+
+  test.afterEach(async () => {
+    await windowsAnswers(undefined);
+  });
+
+  test('a page goes to it as a PDF and a landscape copy, and the app opens no window of its own', async () => {
+    await windowsAnswers('printed');
+    await askPreview();
+    expect(await outcome()).toBe('printed');
+    expect(await previewWindows()).toEqual([]);
+    const [job] = await jobs();
+    expect(job.kind).toBe('windows');
+    expect(job.options).toMatchObject({ title: 'Sign-in page' });
+    expect(job.options.pages).toBeGreaterThan(0);
+    expect(job.options.landscapePages).toBeGreaterThan(0);
+  });
+
+  test('a PDF goes as it is, without a landscape copy or a window to load it in', async () => {
+    await windowsAnswers('cancelled');
+    const pdf = await makePdf(3);
+    await page.evaluate((b64) => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const w = window as unknown as { __outcome?: Promise<unknown>; bulwarkDesktop: { print: { preview(r: unknown): Promise<unknown> } } };
+      w.__outcome = w.bulwarkDesktop.print.preview({ source: 'pdf', data: bytes, title: 'Invoice' });
+    }, pdf);
+    expect(await outcome()).toBe('cancelled');
+    expect((await jobs())[0]).toEqual({ kind: 'windows', options: { title: 'Invoice', pages: 3, landscapePages: null } });
+    expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed() && w.webContents.getURL().startsWith('https://print.bulwark.invalid/')).length)).toBe(0);
+  });
+
+  test('a print window the page opened goes to it and is closed after', async () => {
+    await windowsAnswers('printed');
+    await openPrintWindow('bulwark-print-windows', 2);
+    await askPreview({ source: 'window', name: 'bulwark-print-windows', title: 'Test message' });
+    expect(await outcome()).toBe('printed');
+    expect((await jobs())[0].options).toMatchObject({ title: 'Test message', pages: 2 });
+    await expect.poll(async () => (await blankWindows()).length).toBe(0);
+  });
+
+  test('when Windows won’t show it, the app’s own print window opens instead', async () => {
+    await windowsAnswers('unavailable');
+    await askPreview();
+    const preview = await previewPage();
+    expect(await shownCount(preview)).toMatch(/^\d+ pages?$/);
+    await pressClosing(preview, 'Escape');
+    expect(await outcome()).toBe('cancelled');
+    expect((await jobs()).map((job) => job.kind)).toEqual(['windows']);
+  });
+
+  test('with only Save as PDF allowed, the app’s own window, which can leave the printers out', async () => {
+    await windowsAnswers('printed');
+    await askWithState({ 'file.print': false, 'file.savePdf': true });
+    const preview = await previewPage();
+    expect(await preview.locator('#destination option').allTextContents()).toEqual(['Save as PDF']);
+    await pressClosing(preview, 'Escape');
+    expect(await outcome()).toBe('cancelled');
+    expect(await jobs()).toEqual([]);
+    await page.evaluate(() => (window as unknown as { bulwarkDesktop: { menu: { setState(s: unknown): void } } }).bulwarkDesktop.menu.setState({ 'file.print': true, 'file.savePdf': true }));
+  });
+});

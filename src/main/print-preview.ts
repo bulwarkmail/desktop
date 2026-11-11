@@ -1,8 +1,14 @@
 /**
- * Print preview in a window of the app's own, as Chrome has one and Electron doesn't: the
- * OS's print dialog in Electron shows no pages ("This app doesn't support print preview"
- * on Windows), and macOS and Linux get the same bare dialog. So every Print in the app
- * comes here first: settings on the left, the pages as they will come out on the right.
+ * Every Print in the app comes here. On Windows it opens Windows' own print dialog with the
+ * pages in its preview: the source becomes a PDF (and, for a page of the app's, a landscape
+ * copy), and the native helper is the document Windows draws the pages from
+ * (native/src/print_windows.rs). The dialog Chromium opens shows no pages ("This app
+ * doesn't support print preview"), which is why the helper does it.
+ *
+ * Elsewhere, and on Windows when the helper can't (an older helper, Windows refusing the
+ * dialog) or the organisation allows only one of printing and Save as PDF (Windows' dialog
+ * would offer both), it opens a print preview in a window of the app's own, as Chrome has one
+ * and Electron doesn't: settings on the left, the pages as they will come out on the right.
  *
  * What it shows (a source): a print window the page opened hidden (one message, a plugin's
  * page, and in a current webmail the print copies of mail, calendar and contacts), a PDF
@@ -43,6 +49,7 @@ import { PDF_VIEWER } from './pdf-viewer-print';
 import { pdfFileName } from './menu-text';
 import { showMessageBox } from './message-box';
 import { native } from './native';
+import type { WindowsPrintResult } from './native-loader';
 import {
   countPdfPages,
   defaultChoices,
@@ -95,11 +102,13 @@ const RTL = new Set(['ar', 'fa', 'he']);
 interface FakePrinting {
   printers: { name: string; displayName?: string; options?: Record<string, string> }[];
   defaultPrinter?: string;
-  jobs: { kind: 'printer' | 'system'; options: unknown }[];
+  jobs: { kind: 'printer' | 'system' | 'windows'; options: unknown }[];
   /** A job fails with this reason. */
   failWith?: string;
   /** Each PDF the preview showed, base64: the page's CSP keeps a test from reading its blob. */
   renders?: string[];
+  /** Set: Windows' dialog is taken as there, and answers this. Unset: the app's own window. */
+  windowsDialog?: WindowsPrintResult;
 }
 
 function fakePrinting(): FakePrinting | null {
@@ -275,6 +284,8 @@ export class PrintPreviews {
   private previews = new Map<number, Preview>();
   /** Print windows a page opened, waiting for it to ask for their preview. By name. */
   private popups = new Map<string, Popup>();
+  /** Windows with Windows' print dialog over them. */
+  private windowsDialogs = new Set<BrowserWindow>();
   private lastTheme: unknown;
 
   constructor(private readonly state: StateFile, private readonly shellLook: ShellLook) {
@@ -354,6 +365,88 @@ export class PrintPreviews {
     return [...this.previews.values()].find((preview) => preview.parent === parent && !preview.settled);
   }
 
+  /** Windows' dialog, where it can take this print. */
+  private windowsDialogFor(allowed: { print: boolean; pdf: boolean }): ((windowHandle: Buffer, pdf: Uint8Array, landscape: Uint8Array | null, title: string) => Promise<WindowsPrintResult>) | null {
+    // Windows' dialog always offers Microsoft Print to PDF and the printers both.
+    if (process.platform !== 'win32' || !allowed.print || !allowed.pdf) return null;
+    const fake = fakePrinting();
+    if (fake) {
+      if (!fake.windowsDialog) return null;
+      return async (_handle, pdf, landscape, title) => {
+        fake.jobs.push({ kind: 'windows', options: { title, pages: countPdfPages(Buffer.from(pdf)), landscapePages: landscape ? countPdfPages(Buffer.from(landscape)) : null } });
+        return fake.windowsDialog!;
+      };
+    }
+    const print = native().print;
+    return print ? (handle, pdf, landscape, title) => print.dialog(handle, pdf, landscape, title) : null;
+  }
+
+  /** What the print looks like by default, as a PDF: what Windows' dialog shows and prints. */
+  private async windowsPdfs(source: Source, title: string, paper: PaperSize): Promise<{ portrait: Uint8Array; landscape: Uint8Array | null }> {
+    const options = (landscape: boolean) =>
+      pdfOptions({ ...defaultChoices({ kind: 'pdf' }, undefined, paper), landscape }, { paper, title, date: new Date().toLocaleDateString(uiLanguageNow()), source: source.kind }) as Electron.PrintToPDFOptions;
+    const portrait = await source.contents.printToPDF(options(false));
+    // A page of the app's lays out again for landscape. A PDF keeps its own layout.
+    const landscape = source.kind === 'html' && !source.contents.isDestroyed() ? await source.contents.printToPDF(options(true)) : null;
+    return { portrait, landscape };
+  }
+
+  /** The source as the preview prints it, or null when it's gone. */
+  private async sourceOf(request: PrintSourceRequest): Promise<Source | null> {
+    let source: Source;
+    if (request.source.kind === 'page') {
+      source = { contents: request.source.contents, kind: 'html' };
+    } else if (request.source.kind === 'pdfWindow') {
+      source = { contents: request.source.contents, kind: 'pdf' };
+    } else if (request.source.kind === 'window') {
+      const popup = request.source.window;
+      source = { contents: popup.webContents, kind: 'html', close: () => { if (!popup.isDestroyed()) popup.destroy(); } };
+      await loaded(popup.webContents);
+    } else {
+      source = await pdfSource(request.source.data);
+    }
+    if (source.contents.isDestroyed() || request.parent.isDestroyed()) {
+      source.close?.();
+      return null;
+    }
+    return source;
+  }
+
+  /**
+   * Windows' dialog for this print. Null when it couldn't be shown: the app's own window then,
+   * with `source` as it was made here.
+   */
+  private async printWithWindows(request: PrintSourceRequest, show: NonNullable<ReturnType<PrintPreviews['windowsDialogFor']>>): Promise<{ outcome: PrintPreviewOutcome } | { outcome: null; source: Source | null }> {
+    const { parent, title } = request;
+    this.windowsDialogs.add(parent);
+    let source: Source | null = null;
+    try {
+      let pdfs: { portrait: Uint8Array; landscape: Uint8Array | null };
+      if (request.source.kind === 'pdf') {
+        pdfs = { portrait: request.source.data, landscape: null };
+      } else {
+        source = await this.sourceOf(request);
+        if (!source) return { outcome: 'failed' };
+        try {
+          pdfs = await this.windowsPdfs(source, title, localPaper(app.getLocaleCountryCode?.() || undefined));
+        } catch {
+          return { outcome: null, source };
+        }
+      }
+      if (parent.isDestroyed()) {
+        source?.close?.();
+        return { outcome: 'cancelled' };
+      }
+      const answer = await show(parent.getNativeWindowHandle(), pdfs.portrait, pdfs.landscape, title);
+      if (answer === 'unavailable' || answer === 'invalid') return { outcome: null, source };
+      source?.close?.();
+      if (answer === 'failed') this.failedOver(parent);
+      return { outcome: answer === 'printed' ? 'printed' : answer === 'failed' ? 'failed' : 'cancelled' };
+    } finally {
+      this.windowsDialogs.delete(parent);
+    }
+  }
+
   /** Opens the preview. Resolves when it is done: printed, saved, handed to the OS's dialog, or closed. */
   async open(request: PrintSourceRequest): Promise<PrintPreviewOutcome> {
     const { parent, allowed } = request;
@@ -365,30 +458,23 @@ export class PrintPreviews {
       return 'refused';
     }
     const open = this.openOver(parent);
-    if (open) {
-      open.window.focus();
+    if (open || this.windowsDialogs.has(parent)) {
+      open?.window.focus();
       dropSource();
       return 'busy';
     }
     if (request.theme !== undefined) this.lastTheme = request.theme;
+    if (request.source.kind === 'pdf' && (request.source.data.byteLength === 0 || request.source.data.byteLength > MAX_PDF_BYTES)) return 'refused';
 
-    let source: Source;
-    if (request.source.kind === 'page') {
-      source = { contents: request.source.contents, kind: 'html' };
-    } else if (request.source.kind === 'pdfWindow') {
-      source = { contents: request.source.contents, kind: 'pdf' };
-    } else if (request.source.kind === 'window') {
-      const popup = request.source.window;
-      source = { contents: popup.webContents, kind: 'html', close: () => { if (!popup.isDestroyed()) popup.destroy(); } };
-      await loaded(popup.webContents);
-    } else {
-      if (request.source.data.byteLength === 0 || request.source.data.byteLength > MAX_PDF_BYTES) return 'refused';
-      source = await pdfSource(request.source.data);
+    let made: Source | null = null;
+    const windows = this.windowsDialogFor(allowed);
+    if (windows) {
+      const tried = await this.printWithWindows(request, windows);
+      if (tried.outcome) return tried.outcome;
+      made = tried.source;
     }
-    if (source.contents.isDestroyed() || parent.isDestroyed()) {
-      source.close?.();
-      return 'failed';
-    }
+    const source = made ?? (await this.sourceOf(request));
+    if (!source) return 'failed';
 
     const { printers, options } = allowed.print ? await listPrinters(source.contents) : { printers: [], options: new Map() };
     const memory = this.state.data.print;
@@ -640,10 +726,13 @@ export class PrintPreviews {
   /** Says so, unless the user cancelled it in the OS's own queue. */
   private failed(preview: Preview, reason: string): PrintPreviewOutcome {
     if (/cancel/i.test(reason)) return 'cancelled';
-    const text = strings();
-    const parent = preview.parent.isDestroyed() ? null : preview.parent;
-    void showMessageBox(parent, { type: 'warning', message: text.printFailedTitle, detail: text.printFailedDetail, buttons: [text.ok] });
+    this.failedOver(preview.parent);
     return 'failed';
+  }
+
+  private failedOver(window: BrowserWindow): void {
+    const text = strings();
+    void showMessageBox(window.isDestroyed() ? null : window, { type: 'warning', message: text.printFailedTitle, detail: text.printFailedDetail, buttons: [text.ok] });
   }
 
   /** The OS's own print dialog, as before the preview. */
