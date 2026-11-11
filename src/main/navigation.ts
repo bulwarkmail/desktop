@@ -21,28 +21,31 @@ import { takeUserGesture, watchUserGestures } from './user-gesture';
 import { fitInto } from './window-placement';
 import { windowTypeOf, type WindowManager } from './windows';
 
-/** When each window last opened a web address with no click, for the limit (externalOpenAllowed). */
-const unclicked = new WeakMap<WebContents, number[]>();
-/** The same for main's own calls, which have no window. */
-const unclickedOwn: number[] = [];
+/**
+ * When web addresses last went to the browser with no click, per server origin the app runs for,
+ * across all its windows (pop-ups included), for the limit (externalOpenAllowed). Main's own
+ * calls have a count of their own.
+ */
+const unclicked = new Map<string, number[]>();
+const MAIN_OWN = 'main';
 
 /**
  * An address in the program the OS has for it, by externalOpenAllowed. `from` is who asked: a
  * window, whose click main saw or not (the gesture is spent), or `user` for a pick in a menu
  * the OS drew. With none it's main's own address, held to the rules of a call with no click.
+ * `origin` is the server the asking window's app is for: its windows share one limit.
  */
-export function openExternally(url: string, from?: WebContents | 'user'): boolean {
+export function openExternally(url: string, from?: WebContents | 'user', origin?: string): boolean {
   const parsed = parse(url);
   const window = from === undefined || from === 'user' ? null : from;
   const clicked = from === 'user' || (window !== null && !window.isDestroyed() && takeUserGesture(window));
-  const times = (window ? unclicked.get(window) : unclickedOwn) ?? [];
+  const bucket = window ? origin ?? MAIN_OWN : MAIN_OWN;
   const now = Date.now();
-  const recent = times.filter((at) => now - at < UNCLICKED_OPEN_MS);
+  const recent = (unclicked.get(bucket) ?? []).filter((at) => now - at < UNCLICKED_OPEN_MS);
   if (!externalOpenAllowed(parsed, clicked, recent.length)) return false;
   if (!clicked) {
     recent.push(now);
-    if (window) unclicked.set(window, recent);
-    else unclickedOwn.splice(0, unclickedOwn.length, ...recent);
+    unclicked.set(bucket, recent);
   }
   void shell.openExternal(parsed!.toString()).catch(() => {});
   return true;
@@ -129,7 +132,7 @@ function handleWindowOpen(contents: WebContents, options: GuardOptions) {
       return { action: 'deny' };
     }
     // A link the user clicked is a click main saw; a script's window.open isn't.
-    openExternally(url, contents);
+    openExternally(url, contents, options.origin);
     return { action: 'deny' };
   });
 
@@ -188,7 +191,7 @@ function guardNavigation(contents: WebContents, options: GuardOptions, signIn = 
     if (target && allowed(target)) return;
     event.preventDefault();
     if (!target || (sameOrigin(target, origin) && isJmapProxyPath(target.pathname))) return;
-    openExternally(url, contents);
+    openExternally(url, contents, origin);
     // The webmail set a flag before leaving for the provider's logout page, so
     // its own login redirect would do nothing and the window would stay stuck.
     if (looksLikeProviderLogout(target)) void contents.loadURL(`${origin}/`).catch(() => {});

@@ -83,14 +83,14 @@ export class SsoChain {
 /** Mail, phone, text and calendar addresses: another program opens them, and only on a click. */
 const CLICK_SCHEMES = new Set(['mailto:', 'tel:', 'sms:', 'webcal:']);
 const WEB_SCHEMES = new Set(['http:', 'https:']);
-/** Web addresses a window may open without a click: as many as deep links, 5 in 10 seconds. */
+/** Web addresses the app may open for one server without a click, all its windows together: as many as deep links, 5 in 10 seconds. */
 export const UNCLICKED_OPEN_MAX = 5;
 export const UNCLICKED_OPEN_MS = 10_000;
 
 /**
  * Whether an address goes to the program the OS has for it. A web address opens in the browser
- * on a click, and without one only while its window opened fewer than UNCLICKED_OPEN_MAX that
- * way in the last UNCLICKED_OPEN_MS (`recent`): the webmail opens a reminder's meeting link and
+ * on a click, and without one only while the app's windows opened fewer than UNCLICKED_OPEN_MAX
+ * that way in the last UNCLICKED_OPEN_MS (`recent`): the webmail opens a reminder's meeting link and
  * a provider's sign-out page with no click of the window's own. Mail, phone, text and calendar
  * addresses open only on a click. Any other scheme never leaves the app, and neither does an
  * address with a user name or password in it.

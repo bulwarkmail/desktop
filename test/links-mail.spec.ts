@@ -465,8 +465,9 @@ test.describe('links a page hands to other programs', () => {
   });
 });
 
-test.describe('links on a page used with the keyboard', () => {
-  // An instance whose page has a phone link with the focus (test/support/input-instance.ts).
+test.describe('links on a page used with the keyboard, and pop-ups', () => {
+  // An instance whose page has a phone link with the focus, or opens addresses through pop-ups
+  // of its own (test/support/input-instance.ts).
   let instance: InputInstance;
   test.beforeAll(async () => {
     instance = await startInputInstance(3846);
@@ -502,6 +503,21 @@ test.describe('links on a page used with the keyboard', () => {
       await cdp.send('Input.dispatchKeyEvent', { type: 'char', ...enter, text: '\r', unmodifiedText: '\r' });
       await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...enter });
       await expect.poll(() => opened(app), { timeout: 8_000 }).toContain('tel:+4930555');
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('web addresses with no click: five in ten seconds for the app, its pop-ups included', async () => {
+    const profile = tempProfile('links-popups');
+    const { app } = await openInstance(profile, 'popups');
+    try {
+      // Seven through the bridge, then three pop-ups the page makes, each sent to two addresses.
+      await expect.poll(() => instance.loot.filter((entry) => entry.kind === 'popups-done').length, { timeout: 60_000 }).toBe(1);
+      const went = await opened(app);
+      expect(went.filter((url) => url.includes('/own-')), 'through the bridge').toHaveLength(5);
+      expect(went.length, 'web addresses the page opened in the browser with no click, inside ten seconds').toBeLessThanOrEqual(5);
     } finally {
       await app.close().catch(() => {});
       removeProfile(profile);
