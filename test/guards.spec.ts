@@ -710,11 +710,20 @@ test.describe('navigation guard', () => {
     expect((await opened(app)).length).toBe(before);
   });
 
-  test('tel:, sms: and xmpp: links open through the OS', async () => {
+  test('tel: and sms: links open through the OS on a click, xmpp: never, and none from a script alone', async () => {
+    const before = (await opened(app)).length;
     await page.evaluate(() => {
-      for (const href of ['tel:+4912345', 'sms:+4912345', 'xmpp:a@example.org']) window.open(href, '_blank');
+      for (const href of ['tel:+4900001', 'sms:+4900001', 'xmpp:b@example.org']) window.open(href, '_blank');
     });
-    await expect.poll(() => opened(app)).toEqual(expect.arrayContaining(['tel:+4912345', 'sms:+4912345', 'xmpp:a@example.org']));
+    await page.waitForTimeout(500);
+    expect((await opened(app)).slice(before), 'opened by a script alone').toEqual([]);
+    for (const href of ['tel:+4912345', 'sms:+4912345', 'xmpp:a@example.org']) {
+      // A real click first, which main sees reach the window.
+      await page.mouse.click(5, 300);
+      await page.evaluate((target) => void window.open(target, '_blank'), href);
+    }
+    await expect.poll(() => opened(app)).toEqual(expect.arrayContaining(['tel:+4912345', 'sms:+4912345']));
+    expect(await opened(app)).not.toContain('xmpp:a@example.org');
   });
 
   test('a provider logout that is blocked does not leave the window stuck', async () => {
