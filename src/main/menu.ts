@@ -18,10 +18,10 @@
  */
 
 import { app, BrowserWindow, Menu, shell, type MenuItem, type MenuItemConstructorOptions } from 'electron';
-import { CHANNEL, type MenuBarEntry, type MenuBarEvent, type MenuBarMenu, type MenuBarReport, type MenuState } from '../shared/bridge';
+import { CHANNEL, type MenuBarEntry, type MenuBarEvent, type MenuBarItem, type MenuBarMenu, type MenuBarReport, type MenuState } from '../shared/bridge';
 import { assignMnemonics, barItemsOf, enabledWhileLocked, findBarItem, tidySeparators, windowMenuNames, type BarSourceItem } from './menu-text';
 import { strings } from './strings';
-import { noteUserGesture, pickedJustNow } from './user-gesture';
+import { lineRectFits, noteUserGesture, pickHitsLine, takePick, type ReportedLine } from './user-gesture';
 import type { WindowManager } from './windows';
 
 export interface MenuHooks {
@@ -54,6 +54,15 @@ const MAIN_WINDOW_COMMANDS = new Set(['file.newEvent', 'file.newContact', 'file.
 
 /** The hidden line that takes Ctrl+F off a Mac. */
 const FIND_KEY_ID = 'edit.forwardOrSearch';
+
+/**
+ * Lines that hand the page what's on the clipboard. Picked in the page's own bar, one runs only
+ * on a click inside it (`runBarItem`). Every other line either hands the page nothing or only
+ * what the user then picks in a dialog the OS draws (Open…, Import, Attach, Upload files).
+ */
+const HANDS_DATA_ROLES = new Set(['paste', 'pasteandmatchstyle']);
+/** More lines than any menu has: the rest of a report is left out. */
+const MAX_REPORTED_LINES = 100;
 
 /** Commands whose page action opens a file picker, which needs a user gesture in the page. */
 // Save as… asks main for its dialog (os-save-open.ts), which wants a gesture of main's own as well.
@@ -161,6 +170,7 @@ export class MenuController {
       this.stateByWindow.delete(window);
       this.barReporting.delete(window);
       this.barShown.delete(window);
+      this.reportedLines.delete(window);
       this.applyState();
     });
     windows.on('changed', (list) => {
@@ -786,15 +796,25 @@ export class MenuController {
 
   /**
    * A line of the page's bar was picked: the same item the native menu has, clicked in that
-   * window. Which line is the page's word, so it runs only if a left click or Enter or Space
-   * reached the window a moment ago, as main saw it, and it notes no gesture of its own.
+   * window. Which line is the page's word, so main holds it to the click or key that reached
+   * the window a moment ago, as main saw it, and notes no gesture of its own. One click or key
+   * runs one line. A letter runs only the line it's the underlined letter of. A line that hands
+   * the page what's on the clipboard runs only on a click inside that line, where the page said
+   * the line was before the click (`barReport`), never from the keyboard.
    */
   runBarItem(window: BrowserWindow, key: unknown, label: unknown): void {
     const menu = Menu.getApplicationMenu();
     if (!menu || typeof key !== 'string' || typeof label !== 'string' || window.isDestroyed()) return;
     const item = findBarItem(menu.items as unknown as (BarSourceItem & MenuItem)[], key, label);
     if (!item || !item.enabled) return;
-    if (!pickedJustNow(window.webContents)) return;
+    const pick = takePick(window.webContents);
+    if (!pick) return;
+    if (HANDS_DATA_ROLES.has(String(item.role ?? '').toLowerCase())) {
+      const line = this.reportedLines.get(window)?.get(key);
+      if (!line || line.label !== label || !pickHitsLine(pick, line)) return;
+    } else if (pick.kind === 'letter' && this.barLetterOf(key) !== pick.letter) {
+      return;
+    }
     this.runningBarPick = true;
     try {
       item.click(undefined, window, window.webContents);
@@ -803,9 +823,35 @@ export class MenuController {
     }
   }
 
-  /** The page's bar took this much room, or none, and has the keys or not. */
+  /** The underlined letter of a line of the page's bar, lower case, as `barMenus` gives it. */
+  private barLetterOf(key: string): string | null {
+    const find = (lines: MenuBarItem[]): MenuBarItem | null => {
+      for (const line of lines) {
+        if (line.key === key) return line;
+        const inner = line.items ? find(line.items) : null;
+        if (inner) return inner;
+      }
+      return null;
+    };
+    for (const { item } of this.barItems) {
+      const line = find(barItemsOf((item.submenu?.items ?? []) as unknown as BarSourceItem[], String(this.topIndex(item))));
+      if (line) return line.mnemonic === undefined ? null : (line.label[line.mnemonic] ?? '').toLowerCase() || null;
+    }
+    return null;
+  }
+
+  /** Where the page said the lines of its open menu are, per window, by key: see `barReport`. */
+  private readonly reportedLines = new WeakMap<BrowserWindow, Map<string, ReportedLine & { label: string }>>();
+
+  /**
+   * The page's bar took this much room, or none, and has the keys or not. With a menu open, the
+   * page may say where its lines are (`lines`: key, label and rectangle in CSS pixels): what a
+   * click on a line that hands over the clipboard is held to. A rectangle that isn't a line's
+   * (too large, outside the window, in the bar's own row) is left out, and one that's the same
+   * as before keeps the time it was first reported.
+   */
   barReport(window: BrowserWindow, report: unknown): void {
-    const { height, active } = (report ?? {}) as Partial<MenuBarReport>;
+    const { height, active, lines } = (report ?? {}) as Partial<MenuBarReport> & { lines?: unknown };
     if (typeof height !== 'number' || typeof active !== 'boolean') return;
     // Its first word: it's listening now, and may have to show the bar from the start.
     const first = !this.barReporting.has(window);
@@ -814,5 +860,24 @@ export class MenuController {
     if (active) this.barShown.add(window);
     else this.barShown.delete(window);
     this.windows?.setMenuBarHeight(window, height);
+    if (!active || !Array.isArray(lines)) {
+      this.reportedLines.delete(window);
+      return;
+    }
+    const scale = window.webContents.getZoomFactor();
+    const { width, height: viewHeight } = window.getContentBounds();
+    const before = this.reportedLines.get(window);
+    const kept = new Map<string, ReportedLine & { label: string }>();
+    const now = Date.now();
+    for (const raw of lines.slice(0, MAX_REPORTED_LINES)) {
+      const line = (raw ?? {}) as { key?: unknown; label?: unknown; x?: unknown; y?: unknown; width?: unknown; height?: unknown };
+      if (typeof line.key !== 'string' || typeof line.label !== 'string') continue;
+      const rect = { x: Number(line.x) * scale, y: Number(line.y) * scale, width: Number(line.width) * scale, height: Number(line.height) * scale };
+      if (!lineRectFits(rect, { width, height: viewHeight, barHeight: height * scale, scale })) continue;
+      const old = before?.get(line.key);
+      const same = old && old.label === line.label && old.x === rect.x && old.y === rect.y && old.width === rect.width && old.height === rect.height;
+      kept.set(line.key, { ...rect, label: line.label, at: same ? old.at : now });
+    }
+    this.reportedLines.set(window, kept);
   }
 }

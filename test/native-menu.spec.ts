@@ -10,7 +10,7 @@ import { accentHex, highContrastColours } from '../src/main/chrome-colours';
 import { nextInCycle, sumAnswers } from '../src/main/window-logic';
 import { nextZoomLevel } from '../src/main/zoom';
 import { closeDictionaryDownloads, DEAD_DICTIONARY_URL } from '../src/main/spellcheck';
-import { APP_ORIGIN, fakeOsIntegration, launch, shownPage, launchStandalone, prompts, removeProfile, tempProfile, waitForLogin } from './helpers';
+import { APP_ORIGIN, fakeOsIntegration, launch, opened, shownPage, launchStandalone, prompts, removeProfile, tempProfile, waitForLogin } from './helpers';
 import { clickMenuItem, lastMenu, menuCount, menuItem, pageWith, pickNext, recordMenus, type SeenItem } from './native-helpers';
 import { startHostileInstance, type HostileInstance } from './support/hostile-instance-2';
 import { startInputInstance, type InputInstance } from './support/input-instance';
@@ -1913,20 +1913,10 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
     instance.mode = 'idle';
     const app = await launch(profile, `--instance=${instance.origin}/`, '--ignore-certificate-errors', '--bulwark-test-no-native');
     const page = await shownPage(app);
-    await app.evaluate(({ app: electronApp, shell, BrowserWindow }) => {
+    await app.evaluate(({ app: electronApp, shell }) => {
       electronApp.relaunch = () => undefined;
       shell.openPath = async () => '';
       shell.showItemInFolder = () => undefined;
-      const g = globalThis as unknown as { __pastes: number };
-      g.__pastes = 0;
-      // Paste is stood in for: nothing here reads the clipboard.
-      for (const window of BrowserWindow.getAllWindows()) {
-        const count = () => {
-          g.__pastes += 1;
-        };
-        window.webContents.paste = count;
-        (Object.getPrototypeOf(window.webContents) as { paste: () => void }).paste = count;
-      }
     });
     await fakeOsIntegration(app, answer);
     await expect.poll(() => lootOf('bridge').length).toBeGreaterThan(0);
@@ -1970,4 +1960,92 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
       removeProfile(profile);
     }
   });
+
+  test('a line runs by its own underlined letter, not by another', async () => {
+    const profile = tempProfile('menu-letter');
+    const { app, page } = await openInstance(profile, 'letter-pick');
+    try {
+      await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
+      const { letter } = lootOf('ready')[0] as { letter: string | null };
+      expect(letter, 'Zoom in has an underlined letter').toMatch(/^[a-z]$/);
+      const other = letter === 'q' ? 'x' : 'q';
+      const levels: number[] = [await zoomLevel(app)];
+      for (const key of [other, letter!]) {
+        await page.waitForTimeout(1_300);
+        const code = `Key${key.toUpperCase()}`;
+        await pressKey(page, key, code, key.toUpperCase().charCodeAt(0), key);
+        await expect.poll(() => lootOf('key-ran').length, { timeout: 10_000 }).toBe(levels.length);
+        levels.push(await zoomLevel(app));
+      }
+      expect(levels[1], `another letter (${other})`).toBe(levels[0]);
+      expect(levels[2], `its own letter (${letter})`).toBeGreaterThan(levels[1]);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  /**
+   * How many pastes reached the page. Paste runs in the renderer, so the page's paste event is
+   * what shows it; the page cancels it and never reads what it carries.
+   */
+  const pasted = () => lootOf('paste-event').length;
+
+  test('a click somewhere else on the page is not a pick of Paste, and runs one line at most', async () => {
+    const profile = tempProfile('menu-blank');
+    const { app, page } = await openInstance(profile, 'blank-click');
+    try {
+      await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
+      // One honest click on a blank part of the page; the page then runs Paste, Zoom in, Select all and Documentation eight times.
+      await page.mouse.click(400, 500);
+      await expect.poll(() => lootOf('blank-ran').length, { timeout: 20_000 }).toBe(1);
+      expect(lootOf('blank-ran')[0]).toMatchObject({ 'role.paste': true, docs: 8 });
+      expect(pasted(), 'pastes that reached the page').toBe(0);
+      const docs = (await opened(app)).filter((url) => url.startsWith('https://bulwarkmail.org/docs')).length;
+      expect(docs, 'browser tabs opened by lines the user did not pick').toBeLessThanOrEqual(1);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('a click on the Paste line, where the page said it was before the click, runs Paste once', async () => {
+    const profile = tempProfile('menu-paste');
+    const { app, page } = await openInstance(profile, 'paste-line');
+    try {
+      await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
+      const ready = lootOf('ready')[0] as { found: boolean; x: number; y: number };
+      expect(ready.found).toBe(true);
+      await page.waitForTimeout(300);
+      await page.mouse.click(ready.x, ready.y);
+      await expect.poll(() => lootOf('ran').length, { timeout: 20_000 }).toBe(1);
+      await expect.poll(pasted, { timeout: 5_000 }).toBe(1);
+      await page.waitForTimeout(500);
+      expect(pasted(), 'once').toBe(1);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  for (const [mode, what] of [['paste-late', 'a line said only after the click'], ['paste-whole', 'a line said to fill the whole window'], ['paste-key', 'a key press']] as const) {
+    test(`Paste does not run for ${what}`, async () => {
+      const profile = tempProfile('menu-nopaste');
+      const { app, page } = await openInstance(profile, mode);
+      try {
+        await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
+        const ready = lootOf('ready')[0] as { found: boolean; x: number; y: number };
+        expect(ready.found).toBe(true);
+        await page.waitForTimeout(300);
+        if (mode === 'paste-key') await pressKey(page, 'Enter', 'Enter', 13, '\r');
+        else await page.mouse.click(ready.x, ready.y);
+        await expect.poll(() => lootOf('ran').length, { timeout: 20_000 }).toBe(1);
+        await page.waitForTimeout(500);
+        expect(pasted(), 'pastes that reached the page').toBe(0);
+      } finally {
+        await app.close().catch(() => {});
+        removeProfile(profile);
+      }
+    });
+  }
 });

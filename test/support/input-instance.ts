@@ -6,7 +6,21 @@ import { createServer, type Server } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { generateCertificate } from '../../src/main/cert';
 
-export type InputMode = 'idle' | 'synthetic' | 'blank-click' | 'recent-each-click' | 'recent-two-on-one' | 'popups' | 'mail-frame' | 'key-pick' | 'key-link';
+export type InputMode =
+  | 'idle'
+  | 'synthetic'
+  | 'blank-click'
+  | 'recent-each-click'
+  | 'recent-two-on-one'
+  | 'popups'
+  | 'mail-frame'
+  | 'key-pick'
+  | 'key-link'
+  | 'paste-line'
+  | 'paste-late'
+  | 'paste-whole'
+  | 'paste-key'
+  | 'letter-pick';
 
 export interface InputInstance {
   origin: string;
@@ -181,6 +195,52 @@ const PAYLOAD = `
         send('key-ran', event.key);
       });
       send('ready', null);
+    })();
+  }
+
+  if (mode === 'paste-line' || mode === 'paste-late' || mode === 'paste-whole' || mode === 'paste-key') {
+    // A line of the page's own Edit menu, drawn at a place it tells main about, and Paste run on
+    // a click or a key. paste-line: said before the click, the click on the line. paste-late:
+    // said only after the click. paste-whole: the whole window said to be the line. paste-key:
+    // said before, Paste run on a key press.
+    document.addEventListener('paste', (event) => { event.preventDefault(); send('paste-event', true); }, true);
+    (async () => {
+      await sleep(400);
+      const paste = (await menuLines()).find((line) => line.id === 'role.paste' && line.enabled);
+      const line = document.createElement('div');
+      line.id = 'paste-line';
+      line.textContent = 'Paste';
+      line.style.cssText = 'position:fixed;left:40px;top:120px;width:240px;height:30px;background:#ddd;z-index:10';
+      document.body.appendChild(line);
+      const box = line.getBoundingClientRect();
+      const said = mode === 'paste-whole'
+        ? { x: 0, y: 0, width: innerWidth, height: innerHeight }
+        : { x: box.left, y: box.top, width: box.width, height: box.height };
+      const report = () => d.menu.bar.report({ height: 32, active: true, lines: [{ key: paste.key, label: paste.label, ...said }] });
+      if (mode !== 'paste-late') report();
+      const go = async () => {
+        if (mode === 'paste-late') report();
+        run(paste);
+        await sleep(300);
+        send('ran', null);
+      };
+      if (mode === 'paste-key') window.addEventListener('keydown', go, { once: true });
+      else window.addEventListener('click', go, { once: true });
+      send('ready', { found: !!paste, x: box.left + box.width / 2, y: box.top + box.height / 2 });
+    })();
+  }
+
+  if (mode === 'letter-pick') {
+    // Zoom in, run at every key press: by its own underlined letter, or by another.
+    (async () => {
+      await sleep(400);
+      const zoomIn = (await menuLines()).find((line) => line.id === 'view.zoomIn');
+      window.addEventListener('keydown', async (event) => {
+        if (zoomIn) run(zoomIn);
+        await sleep(300);
+        send('key-ran', event.key);
+      });
+      send('ready', { letter: zoomIn && zoomIn.mnemonic !== undefined ? zoomIn.label[zoomIn.mnemonic].toLowerCase() : null });
     })();
   }
 

@@ -11,8 +11,9 @@
  * held down counts once: its repeats are no new press.
  *
  * Only that input and a native menu's pick are noted. A page's word, such as which line of
- * its own menu bar was picked, is never one: `pickedJustNow` only asks whether a click or
- * Enter reached the window a moment ago, and leaves the gesture where it is.
+ * its own menu bar was picked, is never one. For that bar main keeps the last pick apart
+ * (`takePick`): what it was (a click and where, Enter or Space, or a letter) and when. One pick
+ * runs one line, and the menu decides whether it fits the line the page names.
  */
 
 import type { Input, WebContents } from 'electron';
@@ -22,9 +23,22 @@ const GESTURE_LIFE_MS = 5_000;
 /** From the click or key that picked a line of a menu the page draws to the page's report of it. */
 const PICK_LIFE_MS = 1_000;
 
+/**
+ * What picked a line in a menu the page draws: a left click let go at `x`, `y` (the window's
+ * pixels, as the input event has them), Enter or Space, or a plain letter or digit.
+ */
+export interface MenuPick {
+  at: number;
+  kind: 'click' | 'key' | 'letter';
+  x?: number;
+  y?: number;
+  /** For a letter: the letter, lower case. */
+  letter?: string;
+}
+
 const gestures = new WeakMap<WebContents, number>();
-/** The last left click or Enter or Space in a window, for `pickedJustNow`. Never spent. */
-const picks = new WeakMap<WebContents, number>();
+/** The last pick in a window, for `takePick`. */
+const picks = new WeakMap<WebContents, MenuPick>();
 /** Enter, Space, and the keys that choose in a list, by the `key` the input event carries (the DOM's names). */
 const GESTURE_KEYS = new Set(['Enter', ' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
 /** The keys that run the line a menu has selected. */
@@ -33,15 +47,30 @@ const watched = new WeakSet<WebContents>();
 
 /**
  * What `input-event` hands over. Electron types it as the bare InputEvent; a key's event carries
- * what `Input` describes (`key`, `code`, `isAutoRepeat`, the modifiers), a mouse event `button`.
+ * what `Input` describes (`key`, `code`, `isAutoRepeat`, `isComposing`, the modifiers), a mouse
+ * event `button` and where it was, `x` and `y`.
  */
-type SeenInput = Partial<Pick<Input, 'key' | 'code' | 'isAutoRepeat'>> & { type: string; button?: string; modifiers?: string[] };
+type SeenInput = Partial<Pick<Input, 'key' | 'code' | 'isAutoRepeat' | 'isComposing' | 'control' | 'alt' | 'meta'>> & {
+  type: string;
+  button?: string;
+  modifiers?: string[];
+  x?: number;
+  y?: number;
+};
 
 /** A key that went down, not one the OS repeats while it's held. */
 function keyPressed(input: SeenInput): string | null {
   if (input.type !== 'rawKeyDown' || typeof input.key !== 'string') return null;
   if (input.isAutoRepeat === true || input.modifiers?.includes('isautorepeat')) return null;
   return input.key;
+}
+
+/** A letter or digit typed on its own: what picks a menu line by its underlined letter. */
+function plainLetter(input: SeenInput, key: string): string | null {
+  if ([...key].length !== 1 || !/^[\p{L}\p{N}]$/u.test(key) || input.isComposing === true) return null;
+  const held = input.modifiers ?? [];
+  if (input.control || input.alt || input.meta || held.includes('control') || held.includes('alt') || held.includes('meta')) return null;
+  return key.toLowerCase();
 }
 
 export function noteUserGesture(contents: WebContents): void {
@@ -55,13 +84,48 @@ export function takeUserGesture(contents: WebContents): boolean {
 }
 
 /**
- * A left click (pressed or let go) or Enter or Space reached this window in the last second,
- * as the browser process saw it. Spends nothing: the gesture that input noted is still there
- * for what the pick runs.
+ * The click or key that reached this window in the last second, as the browser process saw
+ * it, for a line of a menu the page draws. Taking it spends it: one pick runs one line. The
+ * gesture the same input noted is apart from it, for what the line runs.
  */
-export function pickedJustNow(contents: WebContents): boolean {
-  const at = picks.get(contents);
-  return at !== undefined && Date.now() - at <= PICK_LIFE_MS;
+export function takePick(contents: WebContents): MenuPick | null {
+  const pick = picks.get(contents);
+  picks.delete(contents);
+  return pick && Date.now() - pick.at <= PICK_LIFE_MS ? pick : null;
+}
+
+/** Where the page said a line of its menu is, in the window's pixels, and when it said so (main's clock). */
+export interface ReportedLine {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  at: number;
+}
+
+/** A menu line's size, in the window's pixels at 100 %: past these it's no line of a menu. */
+export const LINE_MAX_WIDTH = 600;
+export const LINE_MAX_HEIGHT = 64;
+const LINE_MIN_SIDE = 8;
+
+/**
+ * Whether a rectangle the page reports can be a line of its menu: of a line's size, inside the
+ * window, and below the bar's own row, where the menus drop down. `scale` is the page's zoom.
+ */
+export function lineRectFits(rect: { x: number; y: number; width: number; height: number }, view: { width: number; height: number; barHeight: number; scale: number }): boolean {
+  const { x, y, width, height } = rect;
+  if (![x, y, width, height].every((value) => Number.isFinite(value))) return false;
+  if (width < LINE_MIN_SIDE * view.scale || height < LINE_MIN_SIDE * view.scale) return false;
+  if (width > LINE_MAX_WIDTH * view.scale || height > LINE_MAX_HEIGHT * view.scale) return false;
+  if (x < 0 || y < view.barHeight || x + width > view.width || y + height > view.height) return false;
+  return view.barHeight > 0;
+}
+
+/** The pick was a click inside the line, and the page had said where the line was before that click. */
+export function pickHitsLine(pick: MenuPick, line: ReportedLine): boolean {
+  if (pick.kind !== 'click' || pick.x === undefined || pick.y === undefined) return false;
+  if (!(line.at < pick.at)) return false;
+  return pick.x >= line.x && pick.x < line.x + line.width && pick.y >= line.y && pick.y < line.y + line.height;
 }
 
 export function watchUserGestures(contents: WebContents): void {
@@ -73,7 +137,13 @@ export function watchUserGestures(contents: WebContents): void {
     const clicked = input.type === 'mouseDown' && input.button === 'left';
     const pressed = key !== null && GESTURE_KEYS.has(key);
     if (clicked || pressed) noteUserGesture(contents);
-    const released = input.type === 'mouseUp' && input.button === 'left';
-    if (clicked || released || (key !== null && PICK_KEYS.has(key))) picks.set(contents, Date.now());
+    const now = Date.now();
+    // A click picks a line when it's let go, where a page's click handler runs: one pick per click.
+    if (input.type === 'mouseUp' && input.button === 'left') picks.set(contents, { at: now, kind: 'click', x: input.x, y: input.y });
+    else if (key !== null && PICK_KEYS.has(key)) picks.set(contents, { at: now, kind: 'key' });
+    else if (key !== null) {
+      const letter = plainLetter(input, key);
+      if (letter) picks.set(contents, { at: now, kind: 'letter', letter });
+    }
   });
 }
