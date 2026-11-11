@@ -10,7 +10,7 @@
  * New features add a member here and a handler in src/main/features/.
  */
 
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webFrame } from 'electron';
 import { editFileName } from '../shared/edit-rules';
 import {
   type EditBeginResult,
@@ -25,6 +25,7 @@ import {
   type PinStepAnswer,
   type OsUnlockAnswer,
   type HelloAnswer,
+  BLOB_READ_WORLD,
   CHANNEL,
   PRELOAD_ARG,
   type BrowserSignInControls,
@@ -159,6 +160,7 @@ const mode = argument(PRELOAD_ARG.mode);
 // Plain http only when the allowed origin is: an instance a policy allows that way.
 if (allowedOrigin && /^https?:$/.test(window.location.protocol) && window.location.origin === allowedOrigin) {
   const platform = process.platform as 'win32' | 'darwin' | 'linux';
+  webFrame.setIsolatedWorldInfo(BLOB_READ_WORLD, { securityOrigin: window.location.origin, csp: 'connect-src blob:', name: 'Bulwark blob reader' });
   const flushHandlers = new Set<() => Promise<unknown>>();
   ipcRenderer.on(CHANNEL.lifecycleFlush, (_event, id: number) => {
     void Promise.allSettled([...flushHandlers].map((handler) => handler())).then((settled) => {

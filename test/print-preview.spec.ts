@@ -287,6 +287,42 @@ async function openPdfWindow(pages: number): Promise<number> {
   return id;
 }
 
+/** The PDF in a frame of the page, as the webmail's file preview shows an attachment. */
+async function openPdfFrame(pages: number, title: string): Promise<void> {
+  const pdf = await makePdf(pages);
+  await page.evaluate(({ b64, name }) => {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const frame = document.createElement('iframe');
+    frame.id = 'pdf-frame';
+    frame.title = name;
+    frame.style.cssText = 'width:600px;height:400px';
+    frame.src = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    document.body.appendChild(frame);
+  }, { b64: pdf, name: title });
+  // Until the shell has taken the viewer's print.
+  await expect.poll(() => app.evaluate(async ({ BrowserWindow }) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      const frame = window.webContents.mainFrame.framesInSubtree.find((f) => f.url.startsWith('chrome-extension://') && f.parent?.url.startsWith('blob:'));
+      if (frame) return frame.executeJavaScript(`Object.prototype.hasOwnProperty.call(document.querySelector('pdf-viewer') ?? {}, 'onPrint_')`).catch(() => false);
+    }
+    return false;
+  }), { timeout: 20_000 }).toBe(true);
+}
+
+/** The print button of the viewer in the page's frame. */
+function pressFramePrint(): Promise<void> {
+  return app.evaluate(({ BrowserWindow }) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      const frame = window.webContents.mainFrame.framesInSubtree.find((f) => f.url.startsWith('chrome-extension://') && f.parent?.url.startsWith('blob:'));
+      if (frame) void frame.executeJavaScript(`document.querySelector('pdf-viewer').shadowRoot.querySelector('viewer-toolbar').shadowRoot.querySelector('#print').click()`);
+    }
+  });
+}
+
+function closePdfFrame(): Promise<void> {
+  return page.evaluate(() => document.getElementById('pdf-frame')?.remove());
+}
+
 function closeWindow(id: number): Promise<void> {
   return app.evaluate(({ BrowserWindow }, windowId) => BrowserWindow.fromId(windowId)?.destroy(), id);
 }
@@ -332,6 +368,18 @@ test('File > Print (Ctrl+P) in a window that is a PDF shows the PDF’s pages', 
   await pressClosing(preview, 'Escape');
   await expect.poll(async () => (await previewWindows()).length).toBe(0);
   await closeWindow(pdfWindow);
+});
+
+test('the print button of the PDF viewer in a frame of the page (the file preview) opens the preview with that PDF’s pages', async () => {
+  await fakePrinters();
+  await openPdfFrame(4, 'Invoice.pdf');
+  await pressFramePrint();
+  const preview = await previewPage();
+  await expect(preview.locator('#count')).toHaveText('4 pages', { timeout: 30_000 });
+  await pressClosing(preview, 'Escape');
+  await expect.poll(async () => (await previewWindows()).length).toBe(0);
+  expect((await jobs()).filter((job) => job.kind === 'system')).toEqual([]);
+  await closePdfFrame();
 });
 
 test('each printer comes back with its own choices', async () => {
@@ -501,6 +549,16 @@ test.describe('on Windows, Windows’ own print dialog', () => {
     expect(await outcome()).toBe('cancelled');
     expect((await jobs())[0]).toEqual({ kind: 'windows', options: { title: 'Invoice', pages: 3, landscapePages: null } });
     expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed() && w.webContents.getURL().startsWith('https://print.bulwark.invalid/')).length)).toBe(0);
+  });
+
+  test('the PDF viewer in a frame of the page (the file preview) sends that PDF, named as the frame', async () => {
+    await windowsAnswers('printed');
+    await openPdfFrame(2, 'Invoice.pdf');
+    await pressFramePrint();
+    await expect.poll(async () => (await jobs()).length, { timeout: 20_000 }).toBe(1);
+    expect((await jobs())[0]).toEqual({ kind: 'windows', options: { title: 'Invoice.pdf', pages: 2, landscapePages: null } });
+    expect(await previewWindows()).toEqual([]);
+    await closePdfFrame();
   });
 
   test('a print window the page opened goes to it and is closed after', async () => {
