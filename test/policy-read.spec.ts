@@ -795,6 +795,7 @@ test.describe('what a page gets', () => {
     AppLockTimeoutMinutes: 7,
     CrashReportsAllowed: 0,
     RecentFilesInAttach: 0,
+    ComposeInNewWindow: 1,
   }, { InstanceUrl: 'https://mail.corp.example.com' });
 
   test('no internal hosts, no wipe code, no recommended server and no raw value', () => {
@@ -818,6 +819,8 @@ test.describe('what a page gets', () => {
     expect(page.CrashReportsAllowed).toMatchObject({ value: false, locked: true });
     // The Attach menu hides its recent files by it.
     expect(page.RecentFilesInAttach).toMatchObject({ value: false, locked: true });
+    // Every composer opens in a window of its own by it.
+    expect(page.ComposeInNewWindow).toMatchObject({ value: true, locked: true });
   });
 });
 
