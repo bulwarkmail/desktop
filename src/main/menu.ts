@@ -21,7 +21,7 @@ import { app, BrowserWindow, Menu, shell, type MenuItem, type MenuItemConstructo
 import { CHANNEL, type MenuBarEntry, type MenuBarEvent, type MenuBarMenu, type MenuBarReport, type MenuState } from '../shared/bridge';
 import { assignMnemonics, barItemsOf, enabledWhileLocked, findBarItem, tidySeparators, windowMenuNames, type BarSourceItem } from './menu-text';
 import { strings } from './strings';
-import { noteUserGesture } from './user-gesture';
+import { noteUserGesture, pickedJustNow } from './user-gesture';
 import type { WindowManager } from './windows';
 
 export interface MenuHooks {
@@ -281,8 +281,10 @@ export class MenuController {
       window.webContents.send(CHANNEL.menuCommand, id);
       return;
     }
-    // A file picker opens only on a user action, and a menu pick isn't one the page sees.
-    noteUserGesture(window.webContents);
+    // A file picker opens only on a user action, and a native menu's pick isn't one the page
+    // sees. A line of the page's own bar runs only right after a click or key main saw in the
+    // window (runBarItem), and that input noted its gesture already: nothing more is noted.
+    if (!this.runningBarPick) noteUserGesture(window.webContents);
     void window.webContents.executeJavaScript('0', true).catch(() => {}).finally(() => {
       if (!window.isDestroyed()) window.webContents.send(CHANNEL.menuCommand, id);
     });
@@ -779,14 +781,26 @@ export class MenuController {
     return Menu.getApplicationMenu()?.items.indexOf(item) ?? -1;
   }
 
-  /** A line of the page's bar was picked: the same item the native menu has, clicked in that window. */
+  /** Set while a line of the page's bar runs, for `dispatch`. */
+  private runningBarPick = false;
+
+  /**
+   * A line of the page's bar was picked: the same item the native menu has, clicked in that
+   * window. Which line is the page's word, so it runs only if a left click or Enter or Space
+   * reached the window a moment ago, as main saw it, and it notes no gesture of its own.
+   */
   runBarItem(window: BrowserWindow, key: unknown, label: unknown): void {
     const menu = Menu.getApplicationMenu();
     if (!menu || typeof key !== 'string' || typeof label !== 'string' || window.isDestroyed()) return;
     const item = findBarItem(menu.items as unknown as (BarSourceItem & MenuItem)[], key, label);
     if (!item || !item.enabled) return;
-    noteUserGesture(window.webContents);
-    item.click(undefined, window, window.webContents);
+    if (!pickedJustNow(window.webContents)) return;
+    this.runningBarPick = true;
+    try {
+      item.click(undefined, window, window.webContents);
+    } finally {
+      this.runningBarPick = false;
+    }
   }
 
   /** The page's bar took this much room, or none, and has the keys or not. */

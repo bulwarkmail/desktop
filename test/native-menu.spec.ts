@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test, type ElectronApplication, type Page } from '@playwright/test';
@@ -12,6 +12,7 @@ import { nextZoomLevel } from '../src/main/zoom';
 import { closeDictionaryDownloads, DEAD_DICTIONARY_URL } from '../src/main/spellcheck';
 import { APP_ORIGIN, fakeOsIntegration, launch, shownPage, launchStandalone, prompts, removeProfile, tempProfile, waitForLogin } from './helpers';
 import { clickMenuItem, lastMenu, menuCount, menuItem, pageWith, pickNext, recordMenus, type SeenItem } from './native-helpers';
+import { startHostileInstance, type HostileInstance } from './support/hostile-instance-2';
 
 test.describe('the pure parts', () => {
   test('a deep link is parsed down to a message or a folder', () => {
@@ -335,13 +336,18 @@ test.describe('the app menu and windows', () => {
     const view = menus.find((m) => m.id === 'view')!;
     const always = view.items.find((i) => i.label === 'Always show the menu bar')!;
     expect(always).toMatchObject({ type: 'checkbox', checked: false });
+    // A line runs only on the click that picked it, which main sees reach the window.
+    const pick = async (key: string, label: string) => {
+      await page.mouse.click(4, 300);
+      await page.evaluate(([k, l]) => (window as unknown as { bulwarkDesktop: { menu: { bar: Bar } } }).bulwarkDesktop.menu.bar.run(k, l), [key, label]);
+    };
     // A line whose text changed since is refused.
-    await page.evaluate(([key]) => (window as unknown as { bulwarkDesktop: { menu: { bar: Bar } } }).bulwarkDesktop.menu.bar.run(key, 'Something else'), [always.key]);
+    await pick(always.key, 'Something else');
     await page.waitForTimeout(300);
     expect((await menuItem(app, 'view.menuBar'))?.checked).toBe(false);
-    await page.evaluate(([key, label]) => (window as unknown as { bulwarkDesktop: { menu: { bar: Bar } } }).bulwarkDesktop.menu.bar.run(key, label), [always.key, always.label]);
+    await pick(always.key, always.label);
     await expect.poll(async () => (await menuItem(app, 'view.menuBar'))?.checked).toBe(true);
-    await page.evaluate(([key, label]) => (window as unknown as { bulwarkDesktop: { menu: { bar: Bar } } }).bulwarkDesktop.menu.bar.run(key, label), [always.key, always.label]);
+    await pick(always.key, always.label);
     await expect.poll(async () => (await menuItem(app, 'view.menuBar'))?.checked).toBe(false);
 
     const controlsHeight = () => page.evaluate(() => (navigator as unknown as { windowControlsOverlay: { getTitlebarAreaRect: () => DOMRect } }).windowControlsOverlay.getTitlebarAreaRect().height);
@@ -1769,6 +1775,118 @@ test.describe('coming back after a crash', () => {
       await expect.poll(() => windowCount(app), { timeout: 10_000 }).toBe(2);
     } finally {
       await app.close();
+      removeProfile(profile);
+    }
+  });
+});
+
+test.describe('a line of the page\'s own menu bar runs only on a click or key main saw', () => {
+  // An instance whose page runs lines of the bar itself (test/support/hostile-instance-2.ts).
+  // Recent files from a folder of shortcuts this test makes, never the user's own.
+  test.skip(process.platform !== 'win32', 'Windows shortcuts');
+  let hostile: HostileInstance;
+  let root = '';
+  let recent = '';
+
+  test.beforeAll(async () => {
+    hostile = await startHostileInstance(3840);
+    root = mkdtempSync(path.join(tmpdir(), 'bw-menu-recent-'));
+    recent = path.join(root, 'Recent');
+    mkdirSync(recent);
+    mkdirSync(path.join(root, 'Documents'));
+    writeFileSync(path.join(root, 'Documents', 'salary-2026.xlsx'), 'FAKE-SECRET salary table');
+  });
+  test.afterAll(() => {
+    hostile?.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+  });
+
+  const lootOf = (kind: string) => hostile.loot.filter((entry) => entry.kind === kind).map((entry) => entry.body);
+  const zoomLevel = (app: ElectronApplication) => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((w) => w.isVisible())!.webContents.getZoomLevel());
+
+  /** The instance's page with a recent file to find, no lock and every native question answered no. Then `mode` runs. */
+  async function openHostile(profile: string, mode: HostileInstance['mode']): Promise<{ app: ElectronApplication; page: Page }> {
+    hostile.loot.length = 0;
+    hostile.mode = 'idle';
+    const app = await launch(profile, `--instance=${hostile.origin}/`, '--ignore-certificate-errors', '--bulwark-test-no-native', `--bulwark-test-recent-dir=${recent}`);
+    const page = await shownPage(app);
+    await app.evaluate(({ app: electronApp, shell }) => {
+      electronApp.relaunch = () => undefined;
+      shell.openExternal = async () => undefined;
+      shell.openPath = async () => '';
+      shell.showItemInFolder = () => undefined;
+    });
+    await fakeOsIntegration(app, 1);
+    const made = await app.evaluate(({ shell }, [lnk, target]) => shell.writeShortcutLink(lnk, 'create', { target }), [path.join(recent, 'salary-2026.xlsx.lnk'), path.join(root, 'Documents', 'salary-2026.xlsx')]);
+    expect(made).toBe(true);
+    await expect.poll(() => lootOf('bridge').length).toBeGreaterThan(0);
+    await expect.poll(() => app.evaluate(() => (globalThis as unknown as { __bulwarkOs: { hub: { locked: boolean } } }).__bulwarkOs.hub.locked), { timeout: 30_000 }).toBe(false);
+    hostile.loot.length = 0;
+    hostile.mode = mode;
+    await page.reload();
+    return { app, page };
+  }
+
+  test('no mouse, no key: lines the page runs give it no recent files, no user activation and no drive', async () => {
+    const profile = tempProfile('menu-run');
+    const { app } = await openHostile(profile, 'menu');
+    try {
+      await expect.poll(() => lootOf('menu-done').length, { timeout: 60_000 }).toBe(1);
+      expect.soft(lootOf('recent-list'), 'recent files handed to the page').toEqual([]);
+      expect.soft(lootOf('recent-file'), 'file contents handed to the page').toEqual([]);
+      expect.soft(lootOf('activation-after')[0] ?? false, 'navigator.userActivation.isActive after the page ran a menu line').toBe(false);
+      expect.soft((lootOf('drive-by-menu')[0] as { ok?: boolean } | undefined)?.ok ?? false, 'the Files drive turned on').toBe(false);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('a line run on load, or 6 seconds after a click, doesn\'t run; one run right on a click does', async () => {
+    const profile = tempProfile('menu-late');
+    const { app, page } = await openHostile(profile, 'menu-late');
+    try {
+      const before = await zoomLevel(app);
+      await expect.poll(() => lootOf('menu-ready').length, { timeout: 30_000 }).toBe(1);
+      expect(lootOf('ran-on-load')).toHaveLength(1);
+      expect(await zoomLevel(app), 'zoomed by a line run on load').toBe(before);
+      await page.mouse.click(400, 500);
+      await expect.poll(() => lootOf('ran-late').length, { timeout: 20_000 }).toBe(1);
+      expect(await zoomLevel(app), 'zoomed by a line run 6 s after a click').toBe(before);
+      expect(lootOf('ran-late')[0], 'recent files 6 s after a click').toEqual({ ok: false, reason: 'gesture' });
+      await page.mouse.click(400, 500);
+      await expect.poll(() => lootOf('ran-on-click').length, { timeout: 20_000 }).toBe(1);
+      await expect.poll(() => zoomLevel(app), { timeout: 5_000 }).toBeGreaterThan(before);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('two lines run on one click: one gesture for what follows, not one per line', async () => {
+    const profile = tempProfile('menu-twice');
+    const { app, page } = await openHostile(profile, 'menu-twice');
+    try {
+      await expect.poll(() => lootOf('menu-ready').length, { timeout: 30_000 }).toBe(1);
+      await page.mouse.click(400, 500);
+      await expect.poll(() => lootOf('twice').length, { timeout: 20_000 }).toBe(1);
+      const { first, second } = lootOf('twice')[0] as { first: { ok: boolean }; second: unknown };
+      expect(first.ok, 'the click itself still counts').toBe(true);
+      expect(second, 'a second line on the same click').toEqual({ ok: false, reason: 'gesture' });
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('Save as and Import, reported enabled by the page and run with no input, give it no user activation', async () => {
+    const profile = tempProfile('menu-activation');
+    const { app } = await openHostile(profile, 'menu-activation');
+    try {
+      await expect.poll(() => lootOf('menu-done').length, { timeout: 30_000 }).toBe(1);
+      expect(lootOf('activation')[0]).toEqual({ 'file.saveAs': false, 'file.import': false });
+    } finally {
+      await app.close().catch(() => {});
       removeProfile(profile);
     }
   });

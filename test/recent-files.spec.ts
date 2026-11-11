@@ -12,7 +12,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, truncateSync, utimesSync,
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test, type ElectronApplication, type Page } from '@playwright/test';
-import { launch, removeProfile, shownPage, tempProfile, waitForLogin } from './helpers';
+import { fakeOsIntegration, launch, removeProfile, shownPage, tempProfile, waitForLogin } from './helpers';
+import { startHostileInstance as startMenuInstance, type HostileInstance as MenuInstance } from './support/hostile-instance-2';
 
 const win = process.platform === 'win32';
 /** Loopback, the same length as the hosts below: a missing share here fails at once. */
@@ -227,6 +228,56 @@ test.describe('recent files on Windows', () => {
     const again = await clicked<Listed>(app, 'window.bulwarkDesktop.recentFiles.list()');
     expect(again.files!.map((file) => file.name)).toEqual(['notes.txt', 'Quarterly report.docx', 'big.bin']);
     expect(await clicked<Attached>(app, attachCode(byName.get('notes.txt')!))).toEqual({ ok: false, reason: 'unknown' });
+  });
+});
+
+test.describe('a same-origin frame running menu lines', () => {
+  // A frame of an instance's page (test/support/hostile-instance-2.ts) reaches the bridge
+  // through `parent`, runs lines of the menu bar with no input, and asks for recent files.
+  test.skip(!win, 'Windows shortcuts');
+  let instance: MenuInstance;
+  let root = '';
+
+  test.beforeAll(async () => {
+    instance = await startMenuInstance(3841);
+    root = mkdtempSync(path.join(tmpdir(), 'bw-recent-frame-'));
+    mkdirSync(path.join(root, 'Recent'));
+    mkdirSync(path.join(root, 'Documents'));
+    writeFileSync(path.join(root, 'Documents', 'salary-2026.xlsx'), 'FAKE-SECRET salary table');
+  });
+  test.afterAll(() => {
+    instance?.close();
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+  });
+
+  test('no mouse, no key: the frame gets no recent files', async () => {
+    const lootOf = (kind: string) => instance.loot.filter((entry) => entry.kind === kind).map((entry) => entry.body);
+    const profile = tempProfile('recent-frame');
+    instance.loot.length = 0;
+    instance.mode = 'idle';
+    const app = await launch(profile, `--instance=${instance.origin}/`, '--ignore-certificate-errors', '--bulwark-test-no-native', `--bulwark-test-recent-dir=${path.join(root, 'Recent')}`);
+    try {
+      const page = await shownPage(app);
+      await app.evaluate(({ app: electronApp, shell }) => {
+        electronApp.relaunch = () => undefined;
+        shell.openExternal = async () => undefined;
+      });
+      await fakeOsIntegration(app, 1);
+      const made = await app.evaluate(({ shell }, [lnk, target]) => shell.writeShortcutLink(lnk, 'create', { target }), [path.join(root, 'Recent', 'salary-2026.xlsx.lnk'), path.join(root, 'Documents', 'salary-2026.xlsx')]);
+      expect(made).toBe(true);
+      await expect.poll(() => lootOf('bridge').length).toBeGreaterThan(0);
+      await expect.poll(() => app.evaluate(() => (globalThis as unknown as { __bulwarkOs: { hub: { locked: boolean } } }).__bulwarkOs.hub.locked), { timeout: 30_000 }).toBe(false);
+      instance.loot.length = 0;
+      instance.mode = 'menu-frame';
+      await page.reload();
+      await expect.poll(() => lootOf('menu-done').length, { timeout: 60_000 }).toBe(1);
+      expect.soft(lootOf('recent-list'), 'recent files handed to the frame').toEqual([]);
+      expect.soft(lootOf('recent-file'), 'file contents handed to the frame').toEqual([]);
+      expect(JSON.stringify(instance.loot)).not.toContain('FAKE-SECRET');
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
   });
 });
 
