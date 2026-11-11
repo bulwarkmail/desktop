@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { expect, test } from '@playwright/test';
 import type { Input, MouseInputEvent, WebContents } from 'electron';
-import { LINE_MAX_HEIGHT, LINE_MAX_WIDTH, lineRectFits, pickHitsLine, takePick, takeUserGesture, watchUserGestures, type MenuPick } from '../src/main/user-gesture';
+import { takePick, takePress, takeUserGesture, watchUserGestures } from '../src/main/user-gesture';
 
 /**
  * What counts as the user doing something, as main sees the input reach a window. The events
@@ -22,7 +22,12 @@ function contents() {
   const emitter = new EventEmitter();
   watchUserGestures(emitter as unknown as WebContents);
   const input = (value: Input | MouseInputEvent) => emitter.emit('input-event', {}, value);
-  return { input, take: () => takeUserGesture(emitter as unknown as WebContents), pick: () => takePick(emitter as unknown as WebContents) };
+  return {
+    input,
+    take: () => takeUserGesture(emitter as unknown as WebContents),
+    pick: () => takePick(emitter as unknown as WebContents),
+    press: () => takePress(emitter as unknown as WebContents),
+  };
 }
 
 /** A left click as the OS sends it: pressed, then let go at the same place. */
@@ -43,15 +48,39 @@ function later<T>(ms: number, body: () => T): T {
   }
 }
 
-test('a line of a menu the page draws: a click just now picks one line, where it was let go, and leaves its gesture', () => {
+test('a line of a menu the page draws: a click just now picks one line, once it is let go, and leaves its gesture', () => {
   const page = contents();
   expect(page.pick(), 'no input at all').toBeNull();
   page.input(mouseEvent('mouseDown', 'left', 50, 60));
   expect(page.pick(), 'pressed, not let go yet').toBeNull();
   page.input(mouseEvent('mouseUp', 'left', 52, 61));
-  expect(page.pick()).toMatchObject({ kind: 'click', x: 52, y: 61 });
+  expect(page.pick()).toMatchObject({ kind: 'click' });
   expect(page.pick(), 'one click picks one line').toBeNull();
   expect(page.take(), 'the click is still a gesture for what the line runs').toBe(true);
+});
+
+test('where the left button went down is kept for a second, once, apart from the pick and the gesture', () => {
+  const page = contents();
+  expect(page.press(), 'no input at all').toBeNull();
+  page.input(mouseEvent('mouseDown', 'left', 210, 14));
+  expect(page.press()).toMatchObject({ x: 210, y: 14 });
+  expect(page.press(), 'one press, taken once').toBeNull();
+  expect(page.take(), 'the gesture is still there').toBe(true);
+  page.input(mouseEvent('mouseDown', 'left', 210, 14));
+  page.input(mouseEvent('mouseUp', 'left', 300, 400));
+  expect(page.press(), 'the place is where it went down, not where it was let go').toMatchObject({ x: 210, y: 14 });
+  page.input(mouseEvent('mouseDown', 'left', 210, 14));
+  expect(later(1_200, page.press), 'a second later is too late').toBeNull();
+});
+
+test('a right or middle button, a button let go, and a key are no press', () => {
+  const page = contents();
+  page.input(mouseEvent('mouseDown', 'right', 210, 14));
+  page.input(mouseEvent('mouseDown', 'middle', 210, 14));
+  page.input(mouseEvent('mouseUp', 'left', 210, 14));
+  page.input(keyEvent('rawKeyDown', 'Enter', 'Enter'));
+  page.input(keyEvent('rawKeyDown', ' ', 'Space'));
+  expect(page.press()).toBeNull();
 });
 
 test('Enter, Space and the Enter of the number pad pick as a click does, for a second', () => {
@@ -122,35 +151,4 @@ test('typing, a right click and a key let go do not', () => {
   page.input(mouseEvent('mouseDown', 'right'));
   page.input(keyEvent('keyUp', 'Enter', 'Enter'));
   expect(page.take()).toBe(false);
-});
-
-test.describe('a click on a line the page said was there', () => {
-  const view = { width: 1200, height: 800, barHeight: 32, scale: 1 };
-  const line = { x: 40, y: 120, width: 240, height: 30 };
-
-  test('a line\'s size, inside the window and below the bar\'s row, is one; a whole window, a bar row or nothing is not', () => {
-    expect(lineRectFits(line, view)).toBe(true);
-    expect(lineRectFits({ x: 0, y: 0, width: 1200, height: 800 }, view), 'the whole window').toBe(false);
-    expect(lineRectFits({ ...line, width: LINE_MAX_WIDTH + 1 }, view), 'too wide').toBe(false);
-    expect(lineRectFits({ ...line, height: LINE_MAX_HEIGHT + 1 }, view), 'too tall').toBe(false);
-    expect(lineRectFits({ ...line, y: 10 }, view), 'in the bar\'s own row').toBe(false);
-    expect(lineRectFits({ ...line, x: 1100 }, view), 'past the window\'s edge').toBe(false);
-    expect(lineRectFits({ ...line, width: 2 }, view), 'a sliver').toBe(false);
-    expect(lineRectFits({ ...line, x: Number.NaN }, view), 'no number').toBe(false);
-    expect(lineRectFits(line, { ...view, barHeight: 0 }), 'no bar shown').toBe(false);
-    // At 150 % the page's pixels are larger: a line of 400 by 45 CSS pixels still fits.
-    expect(lineRectFits({ x: 60, y: 180, width: 600, height: 67 }, { ...view, scale: 1.5, barHeight: 48 })).toBe(true);
-  });
-
-  test('a click inside, after the page said where the line is, hits it; anywhere else, or a line reported after the click, does not', () => {
-    const at = 1_000;
-    const reported = { ...line, at: at - 50 };
-    const clicked = (x: number, y: number, when = at): MenuPick => ({ kind: 'click', at: when, x, y });
-    expect(pickHitsLine(clicked(100, 130), reported)).toBe(true);
-    expect(pickHitsLine(clicked(400, 500), reported), 'a blank part of the page').toBe(false);
-    expect(pickHitsLine(clicked(100, 130), { ...reported, at: at + 10 }), 'reported after the click').toBe(false);
-    expect(pickHitsLine(clicked(100, 130), { ...reported, at }), 'reported in the same moment').toBe(false);
-    expect(pickHitsLine({ kind: 'key', at }, reported), 'Enter').toBe(false);
-    expect(pickHitsLine({ kind: 'letter', at, letter: 'p' }, reported), 'a letter').toBe(false);
-  });
 });

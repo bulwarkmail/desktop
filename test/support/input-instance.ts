@@ -20,6 +20,10 @@ export type InputMode =
   | 'paste-late'
   | 'paste-whole'
   | 'paste-key'
+  | 'paste-own-button'
+  | 'paste-bar-row'
+  | 'paste-spellings'
+  | 'paste-down'
   | 'letter-pick';
 
 export interface InputInstance {
@@ -120,8 +124,9 @@ const PAYLOAD = `
     (async () => {
       await sleep(400);
       const lines = await menuLines();
-      const byId = (id) => lines.find((line) => line.id === id && line.enabled);
-      send('lines', lines.filter((line) => line.enabled).map((line) => line.id));
+      // Whatever main lists, greyed or not: the page runs it anyway.
+      const byId = (id) => lines.find((line) => line.id === id);
+      send('lines', lines.map((line) => line.id));
       window.addEventListener('click', async () => {
         const ran = {};
         for (const id of ['role.paste', 'view.zoomIn', 'role.selectall']) {
@@ -200,13 +205,13 @@ const PAYLOAD = `
 
   if (mode === 'paste-line' || mode === 'paste-late' || mode === 'paste-whole' || mode === 'paste-key') {
     // A line of the page's own Edit menu, drawn at a place it tells main about, and Paste run on
-    // a click or a key. paste-line: said before the click, the click on the line. paste-late:
-    // said only after the click. paste-whole: the whole window said to be the line. paste-key:
-    // said before, Paste run on a key press.
+    // a click or a key, greyed in main's list or not. paste-line: said before the click, the
+    // click on the line. paste-late: said only after the click. paste-whole: the whole window
+    // said to be the line. paste-key: said before, Paste run on a key press.
     document.addEventListener('paste', (event) => { event.preventDefault(); send('paste-event', true); }, true);
     (async () => {
       await sleep(400);
-      const paste = (await menuLines()).find((line) => line.id === 'role.paste' && line.enabled);
+      const paste = (await menuLines()).find((line) => line.id === 'role.paste');
       const line = document.createElement('div');
       line.id = 'paste-line';
       line.textContent = 'Paste';
@@ -227,6 +232,92 @@ const PAYLOAD = `
       if (mode === 'paste-key') window.addEventListener('keydown', go, { once: true });
       else window.addEventListener('click', go, { once: true });
       send('ready', { found: !!paste, x: box.left + box.width / 2, y: box.top + box.height / 2 });
+    })();
+  }
+
+  if (mode === 'paste-own-button' || mode === 'paste-bar-row' || mode === 'paste-spellings' || mode === 'paste-down') {
+    // More of the same: where, under which name and when the page says its Paste line is.
+    // Only that a paste reached the page. The event is cancelled and what it carries is never touched.
+    let pastes = 0;
+    document.addEventListener('paste', (event) => { event.preventDefault(); pastes += 1; send('paste-event', true); }, true);
+    (async () => {
+      await sleep(400);
+      const paste = (await menuLines()).find((line) => line.id === 'role.paste');
+
+      if (mode === 'paste-own-button') {
+        // The page's own button, and the Paste line said to be exactly where the button is.
+        const button = document.createElement('button');
+        button.id = 'own';
+        button.textContent = 'Continue';
+        button.style.cssText = 'position:fixed;left:300px;top:400px;width:200px;height:44px;z-index:10';
+        document.body.appendChild(button);
+        const box = button.getBoundingClientRect();
+        d.menu.bar.report({ height: 32, active: true, lines: [{ key: paste.key, label: paste.label, x: box.left, y: box.top, width: box.width, height: box.height }] });
+        button.addEventListener('click', async () => {
+          run(paste);
+          await sleep(300);
+          send('ran', null);
+        });
+        send('ready', { found: !!paste, x: box.left + box.width / 2, y: box.top + box.height / 2 });
+      }
+
+      if (mode === 'paste-bar-row') {
+        // The bar said to be a hundredth of a pixel high, and the Paste line said to be in the
+        // top row of the window, where the bar is drawn.
+        const strip = document.createElement('div');
+        strip.id = 'strip';
+        strip.textContent = 'File  Edit  View';
+        strip.style.cssText = 'position:fixed;left:0;top:0;width:500px;height:32px;background:#ddd;z-index:10';
+        document.body.appendChild(strip);
+        d.menu.bar.report({ height: 0.01, active: true, lines: [{ key: paste.key, label: paste.label, x: 200, y: 2, width: 200, height: 28 }] });
+        strip.addEventListener('click', async () => {
+          run(paste);
+          await sleep(300);
+          send('ran', null);
+        });
+        send('ready', { found: !!paste, x: 300, y: 16 });
+      }
+
+      if (mode === 'paste-spellings') {
+        // The window below the bar's row, covered with line-sized rectangles, each under another
+        // spelling of the Paste line's key. Whatever the user clicks, the page runs that spelling.
+        const parts = paste.key.split('/');
+        const spell = (n) => [n, '0' + n, n + '.0', '+' + n, ' ' + n, n + ' ', n + 'e0', '0x' + Number(n).toString(16), '00' + n, n + '.00', '000' + n, '0o' + Number(n).toString(8)];
+        const keys = [];
+        for (const a of spell(parts[0])) for (const b of spell(parts[1])) keys.push([a, b, ...parts.slice(2)].join('/'));
+        const W = 600, H = 64, TOP = 32;
+        const tiles = [];
+        const RIGHT = innerWidth - 2, BOTTOM = innerHeight - 2;
+        for (let y = TOP; y < BOTTOM - 8 && tiles.length < 100; y += H) {
+          for (let x = 0; x < RIGHT - 8 && tiles.length < 100; x += W) {
+            tiles.push({ key: keys[tiles.length], label: paste.label, x, y, width: Math.min(W, RIGHT - x), height: Math.min(H, BOTTOM - y) });
+          }
+        }
+        d.menu.bar.report({ height: TOP, active: true, lines: tiles });
+        window.addEventListener('click', async (event) => {
+          const tile = tiles.find((t) => event.clientX >= t.x && event.clientX < t.x + t.width && event.clientY >= t.y && event.clientY < t.y + t.height);
+          if (tile) d.menu.bar.run(tile.key, tile.label);
+          await sleep(300);
+          send('clicked', { x: event.clientX, y: event.clientY, tile: tile ? tile.key : null, pastes });
+        });
+        send('ready', { found: !!paste, key: paste.key, tiles: tiles.length, width: innerWidth, height: innerHeight });
+      }
+
+      if (mode === 'paste-down') {
+        // Nothing said in advance. When the button goes down the page says the Paste line is
+        // under the pointer; when it comes up the page runs Paste.
+        window.addEventListener('mousedown', (event) => {
+          const x = Math.max(0, event.clientX - 20);
+          const y = Math.max(33, event.clientY - 20);
+          d.menu.bar.report({ height: 32, active: true, lines: [{ key: paste.key, label: paste.label, x, y, width: 40, height: 40 }] });
+        }, true);
+        window.addEventListener('click', async (event) => {
+          run(paste);
+          await sleep(300);
+          send('clicked', { x: event.clientX, y: event.clientY });
+        });
+        send('ready', { found: !!paste });
+      }
     })();
   }
 

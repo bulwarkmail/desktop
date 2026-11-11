@@ -4,7 +4,7 @@ import path from 'node:path';
 import { expect, test, type ElectronApplication, type Page } from '@playwright/test';
 import { appPathOfDeepLink, deepLinkFromArgv, LinkRateLimit, parseDeepLink } from '../src/main/deep-link';
 import { AltTracker } from '../src/main/features/window-input';
-import { assignMnemonics, barItemsOf, escapeMenuLabel, findBarItem, labelParts, lineMnemonics, linkOffersOpen, pdfFileName, pickSpellLanguages, safeFileName, safeImageName, shownAccelerator, tidySeparators, toMenuTemplate, windowMenuNames, type BarSourceItem } from '../src/main/menu-text';
+import { assignMnemonics, barItemsOf, escapeMenuLabel, findBarItem, holdsOsMenuLine, labelParts, lineMnemonics, linkOffersOpen, pageBarMayRun, pdfFileName, pickSpellLanguages, safeFileName, safeImageName, shownAccelerator, tidySeparators, toMenuTemplate, windowMenuNames, type BarSourceItem } from '../src/main/menu-text';
 import { LABEL_KEY } from '../src/main/label-keys';
 import { accentHex, highContrastColours } from '../src/main/chrome-colours';
 import { nextInCycle, sumAnswers } from '../src/main/window-logic';
@@ -137,6 +137,43 @@ test.describe('the pure parts', () => {
     expect(findBarItem(menus, '0', 'File'), 'a menu is not a command').toBeNull();
     expect(findBarItem(menus, '0/9', 'New message')).toBeNull();
     expect(findBarItem(menus, '../0', 'New message')).toBeNull();
+  });
+
+  test('a line of the bar has one key: other spellings of its place name nothing', () => {
+    const plain = (label: string, role?: string): BarSourceItem => ({ label, type: 'normal', enabled: true, visible: true, checked: false, ...(role ? { role } : {}) });
+    const menus: BarSourceItem[] = [
+      { ...plain('File'), type: 'submenu', submenu: { items: [plain('New message')] } },
+      { ...plain('Edit'), type: 'submenu', submenu: { items: [plain('Undo'), plain('Redo'), plain('Cut'), plain('Copy'), plain('Paste', 'paste'), plain('Select all')] } },
+    ];
+    expect(findBarItem(menus, '1/4', 'Paste')?.label).toBe('Paste');
+    const spellings = ['01/4', '1/04', '1/4.0', '+1/4', ' 1/4', '1/4 ', '1/4e0', '1/0x4', '1/0b100', '1/0o4', '1.0/4', '1/4.', '1/+4', '\t1/4', '1/4\n', '1//4', '1/4/', '/1/4', '1/-0', '1/99999999999999999999'];
+    expect(spellings.filter((key) => findBarItem(menus, key, 'Paste') !== null)).toEqual([]);
+    // The keys `barItemsOf` hands out are the ones that are read.
+    const drawn = barItemsOf(menus[1].submenu!.items, '1');
+    expect(drawn.map((line) => findBarItem(menus, line.key, line.label)?.label)).toEqual(['Undo', 'Redo', 'Cut', 'Copy', 'Paste', 'Select all']);
+  });
+
+  test('Paste is the OS menu\'s line: the page\'s bar gets it greyed with its key, and the menu that has it is known', () => {
+    const line = (label: string, extra: Partial<BarSourceItem> = {}): BarSourceItem => ({ label, type: 'normal', enabled: true, visible: true, checked: false, ...extra });
+    const edit = [
+      line('Undo', { role: 'undo' }),
+      line('Cut', { role: 'cut' }),
+      line('Copy', { role: 'copy' }),
+      line('Paste', { role: 'paste', getDefaultRoleAccelerator: () => 'CommandOrControl+V' }),
+      line('Paste and Match Style', { role: 'pasteAndMatchStyle' }),
+      line('Select all', { role: 'selectAll' }),
+      line('Search mail', { id: 'edit.search' }),
+    ];
+    for (const role of ['paste', 'Paste', 'pasteAndMatchStyle', 'pasteandmatchstyle']) expect(pageBarMayRun({ role }), role).toBe(false);
+    for (const role of ['undo', 'redo', 'cut', 'copy', 'selectAll']) expect(pageBarMayRun({ role }), role).toBe(true);
+    expect(pageBarMayRun({}), 'a command of the app\'s own').toBe(true);
+    const drawn = barItemsOf(edit, '1');
+    expect(drawn.map((item) => [item.label, item.enabled])).toEqual([['Undo', true], ['Cut', true], ['Copy', true], ['Paste', false], ['Paste and Match Style', false], ['Select all', true], ['Search mail', true]]);
+    expect(drawn[3].accelerator, 'the key stays next to it').toBe('CommandOrControl+V');
+    expect(holdsOsMenuLine(edit)).toBe(true);
+    expect(holdsOsMenuLine(edit.filter((item) => !/paste/i.test(item.role ?? '')))).toBe(false);
+    expect(holdsOsMenuLine([line('More', { submenu: { items: [line('Paste', { role: 'paste' })] } })]), 'in a submenu').toBe(true);
+    expect(holdsOsMenuLine([line('Paste', { role: 'paste', visible: false })]), 'a hidden line is in no menu').toBe(false);
   });
 
   test('a label reads as text, with its marked letter', () => {
@@ -2035,27 +2072,17 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
     }
   });
 
-  test('a click on the Paste line, where the page said it was before the click, runs Paste once', async () => {
-    const profile = tempProfile('menu-paste');
-    const { app, page } = await openInstance(profile, 'paste-line');
-    try {
-      await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
-      const ready = lootOf('ready')[0] as { found: boolean; x: number; y: number };
-      expect(ready.found).toBe(true);
-      await page.waitForTimeout(300);
-      await page.mouse.click(ready.x, ready.y);
-      await expect.poll(() => lootOf('ran').length, { timeout: 20_000 }).toBe(1);
-      await expect.poll(pasted, { timeout: 5_000 }).toBe(1);
-      await page.waitForTimeout(500);
-      expect(pasted(), 'once').toBe(1);
-    } finally {
-      await app.close().catch(() => {});
-      removeProfile(profile);
-    }
-  });
-
-  for (const [mode, what] of [['paste-late', 'a line said only after the click'], ['paste-whole', 'a line said to fill the whole window'], ['paste-key', 'a key press']] as const) {
-    test(`Paste does not run for ${what}`, async () => {
+  // Paste is not the page's bar's to run, wherever, under whatever name and whenever the page
+  // says its Paste line is. It is in the menu the OS draws, and on its keys.
+  for (const [mode, what] of [
+    ['paste-line', 'a click on the line the page said was Paste\'s, before the click'],
+    ['paste-late', 'a line said only after the click'],
+    ['paste-whole', 'a line said to fill the whole window'],
+    ['paste-key', 'a key press'],
+    ['paste-own-button', 'a click on a button of the page\'s own, said to be the Paste line'],
+    ['paste-bar-row', 'a line said to be in the bar\'s own row, whatever height the page gives the bar'],
+  ] as const) {
+    test(`Paste does not run from the page's bar for ${what}`, async () => {
       const profile = tempProfile('menu-nopaste');
       const { app, page } = await openInstance(profile, mode);
       try {
@@ -2074,4 +2101,177 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
       }
     });
   }
+
+  test('Paste does not run from the page\'s bar for a click anywhere below the bar, however the page spells the line\'s key', async () => {
+    const profile = tempProfile('menu-spell');
+    const { app, page } = await openInstance(profile, 'paste-spellings');
+    try {
+      await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
+      const ready = lootOf('ready')[0] as { found: boolean; key: string; tiles: number; width: number; height: number };
+      expect(ready.found).toBe(true);
+      expect(ready.tiles).toBeGreaterThan(10);
+      await page.waitForTimeout(300);
+      // Three clicks the user makes for reasons of their own, each past the second a pick lasts.
+      const spots = [[400, 500], [Math.round(ready.width * 0.8), Math.round(ready.height * 0.3)], [60, ready.height - 40]];
+      for (const [index, [x, y]] of spots.entries()) {
+        await page.mouse.click(x, y);
+        await expect.poll(() => lootOf('clicked').length, { timeout: 20_000 }).toBe(index + 1);
+        await page.waitForTimeout(1_300);
+      }
+      expect((lootOf('clicked') as { tile: string | null }[]).every((click) => click.tile !== null), 'each click was on a line the page had named').toBe(true);
+      expect(pasted(), 'pastes that reached the page after three clicks on blank parts of the page').toBe(0);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('Paste does not run from the page\'s bar for a line the page names while the button is down', async () => {
+    const profile = tempProfile('menu-down');
+    const { app, page } = await openInstance(profile, 'paste-down');
+    try {
+      await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
+      await page.waitForTimeout(300);
+      // A click as a hand makes it: the button is down for about a tenth of a second.
+      await page.mouse.move(420, 520);
+      await page.mouse.down();
+      await page.waitForTimeout(90);
+      await page.mouse.up();
+      await expect.poll(() => lootOf('clicked').length, { timeout: 20_000 }).toBe(1);
+      await page.waitForTimeout(500);
+      const held = pasted();
+      // And one with no time between down and up.
+      await page.waitForTimeout(1_300);
+      await page.mouse.click(700, 300);
+      await expect.poll(() => lootOf('clicked').length, { timeout: 20_000 }).toBe(2);
+      await page.waitForTimeout(500);
+      expect(held, 'pastes that reached the page after a click held 90 ms').toBe(0);
+      expect(pasted(), 'and after one more with no hold').toBe(0);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('the menu that has Paste opens as the OS\'s own, for a press in the top row or Alt and its letter, where main puts it', async () => {
+    const profile = tempProfile('menu-os-edit');
+    const { app, page } = await openInstance(profile, 'idle');
+    type Line = { key: string; id?: string; label: string; type: string; enabled: boolean; accelerator?: string };
+    type Bar = { menus: () => Promise<{ id: string; items: Line[] }[]>; open: (id: string, at: { x: number; y: number }) => void; report: (report: { height: number; active: boolean }) => void };
+    const bar = { bulwarkDesktop: { menu: { bar: {} as Bar } } };
+    try {
+      // What a native menu would have shown, and where: nothing here can click in one.
+      await app.evaluate(({ Menu }) => {
+        const g = globalThis as unknown as { __popups: { roles: string[]; x?: number; y?: number }[] };
+        g.__popups = [];
+        Menu.prototype.popup = function popup(this: { items: { role?: string }[] }, options?: { x?: number; y?: number; callback?: () => void }) {
+          g.__popups.push({ roles: this.items.map((item) => item.role ?? ''), x: options?.x, y: options?.y });
+          setTimeout(() => options?.callback?.(), 0);
+        } as never;
+      });
+      const popups = () => app.evaluate(() => (globalThis as unknown as { __popups: { roles: string[]; x?: number; y?: number }[] }).__popups.splice(0));
+      const open = (id: string, x: number, y: number) =>
+        page.evaluate(([menu, px, py]) => (window as unknown as typeof bar).bulwarkDesktop.menu.bar.open(menu, { x: px, y: py }), [id, x, y] as const);
+      const report = (height: number) => page.evaluate((h) => (window as unknown as typeof bar).bulwarkDesktop.menu.bar.report({ height: h, active: true }), height);
+      /** The page asks for the Edit menu at a place of its choosing; what came up. */
+      const asked = async () => {
+        await open('edit', 600, 500);
+        await page.waitForTimeout(300);
+        return popups();
+      };
+      // Past the second a press lasts, so each step stands alone.
+      const apart = () => page.waitForTimeout(1_200);
+
+      // The page's bar gets Edit with Paste greyed and its key next to it, the other lines as they are.
+      const menus = await page.evaluate(() => (window as unknown as typeof bar).bulwarkDesktop.menu.bar.menus());
+      const edit = menus.find((menu) => menu.id === 'edit')!;
+      const byRole = (role: string) => edit.items.find((item) => item.id?.toLowerCase() === `role.${role}`);
+      expect(byRole('paste')).toMatchObject({ enabled: false, label: 'Paste' });
+      expect(byRole('paste')!.accelerator).toMatch(/\+V$/);
+      for (const role of ['undo', 'redo', 'cut', 'copy', 'selectall']) expect.soft(byRole(role)?.enabled, role).toBe(true);
+
+      expect(await asked(), 'no input at all').toEqual([]);
+
+      await page.mouse.click(400, 500);
+      expect(await asked(), 'a click further down the page').toEqual([]);
+      await apart();
+
+      await pressKey(page, 'Enter', 'Enter', 13, '\r');
+      expect(await asked(), 'Enter').toEqual([]);
+      await pressKey(page, ' ', 'Space', 32, ' ');
+      expect(await asked(), 'Space').toEqual([]);
+      await apart();
+
+      // No bar reported yet: the top row is the title bar's, 56 pixels at this zoom.
+      await page.mouse.click(220, 12);
+      const first = await asked();
+      expect(first, 'a press in the top row').toHaveLength(1);
+      expect(first[0].roles).toContain('paste');
+      expect({ x: first[0].x, y: first[0].y }, 'at the press, below the row: not where the page said').toEqual({ x: 220, y: 56 });
+      expect(await asked(), 'one press opens one menu').toEqual([]);
+      await apart();
+
+      await page.mouse.click(220, 12);
+      await apart();
+      expect(await asked(), 'a press more than a second ago').toEqual([]);
+
+      // With a bar of 32 pixels the row is the bar's.
+      await report(32);
+      await page.mouse.click(220, 44);
+      expect(await asked(), 'a press just below a bar of 32 pixels').toEqual([]);
+      await apart();
+      await page.mouse.click(300, 20);
+      const second = await asked();
+      expect(second.map(({ x, y }) => ({ x, y })), 'a press in the bar of 32 pixels').toEqual([{ x: 300, y: 32 }]);
+      await apart();
+
+      // Whatever height the page gives its bar, the row ends where a title bar ends.
+      await report(400);
+      await page.mouse.click(220, 100);
+      expect(await asked(), 'a press at 100 pixels, the bar said to be 400 high').toEqual([]);
+      await apart();
+      await report(32);
+
+      // Alt and the menu's letter, as main sees the keys: the page's place along the row counts, its height doesn't.
+      const cdp = await page.context().newCDPSession(page);
+      const altAnd = async (key: string, vk: number) => {
+        await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Alt', code: 'AltLeft', windowsVirtualKeyCode: 18, nativeVirtualKeyCode: 18, modifiers: 1 });
+        await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: `Key${key.toUpperCase()}`, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers: 1 });
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: `Key${key.toUpperCase()}`, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers: 1 });
+        await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Alt', code: 'AltLeft', windowsVirtualKeyCode: 18, nativeVirtualKeyCode: 18 });
+      };
+      await altAnd('e', 69);
+      await open('edit', 45, 500);
+      await page.waitForTimeout(300);
+      expect((await popups()).map(({ x, y }) => ({ x, y })), 'Alt+E').toEqual([{ x: 45, y: 32 }]);
+      await apart();
+      await altAnd('f', 70);
+      expect(await asked(), 'Alt and another menu\'s letter').toEqual([]);
+      await apart();
+
+      // The menus the page's bar may run every line of open as before, where the page says.
+      await open('file', 40, 32);
+      await page.waitForTimeout(300);
+      const file = await popups();
+      expect(file.map(({ x, y }) => ({ x, y })), 'File, with no press').toEqual([{ x: 40, y: 32 }]);
+      expect(file[0].roles).not.toContain('paste');
+
+      // Ctrl+V is still Chromium's own. The page cancels the paste and never looks at what it carries.
+      await page.evaluate(() => {
+        const w = window as unknown as { __pastes: number };
+        w.__pastes = 0;
+        document.addEventListener('paste', (event) => {
+          event.preventDefault();
+          w.__pastes += 1;
+        }, true);
+      });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, nativeVirtualKeyCode: 86, modifiers: 2 });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, nativeVirtualKeyCode: 86, modifiers: 2 });
+      await cdp.detach();
+      await expect.poll(() => page.evaluate(() => (window as unknown as { __pastes: number }).__pastes), { timeout: 5_000 }).toBe(1);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
 });
