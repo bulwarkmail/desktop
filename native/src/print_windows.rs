@@ -30,7 +30,6 @@ use windows::Graphics::Printing::{
 use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
 use windows::Win32::Foundation::{E_INVALIDARG, HMODULE, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_COLOR_F, D2D_RECT_F, D2D_SIZE_F};
-use windows::System::{DispatcherQueue, DispatcherQueueController};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_FACTORY_TYPE, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_MULTI_THREADED, D2D1_PRINT_CONTROL_PROPERTIES, D2D1_PRINT_FONT_SUBSET_MODE_DEFAULT,
@@ -49,7 +48,6 @@ use windows::Win32::Storage::Xps::Printing::IPrintDocumentPackageTarget;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32};
 use windows::Win32::System::WinRT::Pdf::{IPdfRendererNative, PDF_RENDER_PARAMS};
-use windows::Win32::System::WinRT::{DispatcherQueueOptions, DQTAT_COM_NONE, DQTYPE_THREAD_CURRENT};
 use windows::Win32::System::WinRT::Printing::{
     IPrintDocumentPageSource, IPrintDocumentPageSource_Impl, IPrintManagerInterop, IPrintPreviewPageCollection, IPrintPreviewPageCollection_Impl,
 };
@@ -66,7 +64,7 @@ const JOB_WAIT: Duration = Duration::from_secs(15 * 60);
 
 // ─── Libraries, loaded when a dialog opens ───────────────────
 //
-// Direct3D, Direct2D, Windows' PDF renderer and CoreMessaging are looked up at run time, from
+// Direct3D, Direct2D and Windows' PDF renderer are looked up at run time, from
 // System32 only: linked, they would load with the helper at every start of the app.
 
 fn system_function(library: PCWSTR, name: PCSTR) -> WinResult<unsafe extern "system" fn() -> isize> {
@@ -88,8 +86,6 @@ type D3D11CreateDeviceFn = unsafe extern "system" fn(
 ) -> HRESULT;
 type D2D1CreateFactoryFn = unsafe extern "system" fn(kind: D2D1_FACTORY_TYPE, iid: *const GUID, options: *const D2D1_FACTORY_OPTIONS, factory: *mut *mut c_void) -> HRESULT;
 type PdfCreateRendererFn = unsafe extern "system" fn(device: *mut c_void, renderer: *mut *mut c_void) -> HRESULT;
-type CreateDispatcherQueueControllerFn = unsafe extern "system" fn(options: DispatcherQueueOptions, controller: *mut *mut c_void) -> HRESULT;
-
 fn d3d11_create_device(driver: D3D_DRIVER_TYPE) -> WinResult<ID3D11Device> {
     let create: D3D11CreateDeviceFn = unsafe { std::mem::transmute(system_function(w!("d3d11.dll"), s!("D3D11CreateDevice"))?) };
     let mut device = std::ptr::null_mut();
@@ -114,15 +110,6 @@ fn pdf_create_renderer(device: &IDXGIDevice) -> WinResult<IPdfRendererNative> {
     unsafe {
         create(device.as_raw(), &mut renderer).ok()?;
         Ok(IPdfRendererNative::from_raw(renderer))
-    }
-}
-
-fn create_dispatcher_queue_controller(options: DispatcherQueueOptions) -> WinResult<DispatcherQueueController> {
-    let create: CreateDispatcherQueueControllerFn = unsafe { std::mem::transmute(system_function(w!("coremessaging.dll"), s!("CreateDispatcherQueueController"))?) };
-    let mut controller = std::ptr::null_mut();
-    unsafe {
-        create(options, &mut controller).ok()?;
-        Ok(DispatcherQueueController::from_raw(controller))
     }
 }
 
@@ -456,20 +443,6 @@ fn load_pdf(data: &[u8]) -> WinResult<PdfDocument> {
     wait_for(&PdfDocument::LoadFromStreamAsync(&stream)?, Some(Duration::from_secs(60)))?.ok_or_else(|| windows::core::Error::from_hresult(E_INVALIDARG))
 }
 
-/// Windows hands the print request to the window's thread through its DispatcherQueue, and
-/// fails the dialog with E_INVALIDARG when the thread has none. Electron's main thread has
-/// none of its own: one is made once and kept for the app's life.
-fn ensure_dispatcher_queue() -> WinResult<()> {
-    if DispatcherQueue::GetForCurrentThread().is_ok() {
-        return Ok(());
-    }
-    let options = DispatcherQueueOptions { dwSize: std::mem::size_of::<DispatcherQueueOptions>() as u32, threadType: DQTYPE_THREAD_CURRENT, apartmentType: DQTAT_COM_NONE };
-    let controller = create_dispatcher_queue_controller(options)?;
-    // Kept: the queue goes with its controller.
-    std::mem::forget(controller);
-    Ok(())
-}
-
 /// The dialog while it's up. Opened on the window's own thread (Windows refuses it from any
 /// other with E_INVALIDARG), waited for on a worker, and let go of on the window's thread.
 pub struct Dialog {
@@ -512,7 +485,6 @@ pub fn show(hwnd: &[u8], data: Vec<u8>, landscape: Option<Vec<u8>>, title: Strin
         trace("interop", error);
         "unavailable"
     })?;
-    trace("dispatcher queue", ensure_dispatcher_queue());
     let manager = unsafe { interop.GetForWindow::<PrintManager>(window) }.map_err(|error| {
         trace("GetForWindow", error);
         "unavailable"

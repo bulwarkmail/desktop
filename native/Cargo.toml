@@ -29,7 +29,6 @@ windows = { version = "0.62", features = [
   "Storage_Streams",
   "Storage_Provider",
   "Storage_Search",
-  "System",
   "Win32_Foundation",
   "Win32_Graphics_Direct2D",
   "Win32_Graphics_Direct2D_Common",
