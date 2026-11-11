@@ -349,6 +349,11 @@ const en = {
   importResumeContinue: 'Continue',
   importResumeLater: 'Not now',
   importResumeStop: 'Stop this import',
+  recentAskTitle: (host: string) => `Let ${host} see the files you opened recently on this computer?`,
+  recentAskTitleApp: 'Show the files you opened recently on this computer when you attach a file?',
+  recentAskDetail: 'The page gets the names, folders and sizes of the last 20 files you opened in any program, and the content of one when you pick it to attach. A plugin may be asking.',
+  recentAskAllow: 'Show recent files',
+  recentAskDeny: "Don't allow",
 };
 
 const de: typeof en = {
@@ -364,6 +369,11 @@ const de: typeof en = {
   importResumeContinue: 'Fortsetzen',
   importResumeLater: 'Nicht jetzt',
   importResumeStop: 'Diesen Import beenden',
+  recentAskTitle: (host) => `${host} die Dateien sehen lassen, die Sie zuletzt auf diesem Computer geöffnet haben?`,
+  recentAskTitleApp: 'Beim Anhängen die Dateien zeigen, die Sie zuletzt auf diesem Computer geöffnet haben?',
+  recentAskDetail: 'Die Seite erhält Namen, Ordner und Größe der letzten 20 Dateien, die Sie in einem beliebigen Programm geöffnet haben, und den Inhalt einer Datei, wenn Sie sie zum Anhängen auswählen. Möglicherweise fragt ein Plugin.',
+  recentAskAllow: 'Zuletzt verwendete Dateien zeigen',
+  recentAskDeny: 'Nicht zulassen',
   unsavedTitle: 'Ein Entwurf konnte nicht gespeichert werden',
   unsavedDetail: 'Wenn Sie jetzt schließen, geht verloren, was Sie seit dem letzten Speichern geschrieben haben.',
   closeAnyway: 'Trotzdem schließen',
@@ -697,12 +707,19 @@ const de: typeof en = {
 let uiLanguage: string | null = null;
 let labels: Partial<typeof en> = {};
 
-/** Keeps what fits: a known key with text, of a sane length, and no function replaced. */
+/**
+ * The questions that ask the user to allow something: switching to the beta channel or back
+ * to an older version, recent files. Their text is the shell's own, in English or German,
+ * whatever labels the page sent: the page that asks never words the question.
+ */
+const CONSENT_KEY = /^(updateBeta|updateOlder|recentAsk)/;
+
+/** Keeps what fits: a known key with text, of a sane length, no function replaced and no question that asks for consent. */
 export function cleanLabels(raw: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   if (!raw || typeof raw !== 'object') return out;
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!LABEL_KEY.test(key) || typeof value !== 'string' || !value.trim() || value.length > 300) continue;
+    if (!LABEL_KEY.test(key) || CONSENT_KEY.test(key) || typeof value !== 'string' || !value.trim() || value.length > 300) continue;
     if (typeof (en as Record<string, unknown>)[key] === 'string' && labelKeepsPlaceholders(key, value)) out[key] = value;
   }
   return out;

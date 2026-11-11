@@ -7,6 +7,67 @@ import path from 'node:path';
 
 /** As many as Outlook's Attach menu, and enough. */
 export const RECENT_FILES_MAX = 20;
+/** How long a no holds for a server: its page can't put the question up again before that. */
+export const RECENT_NO_HOLD_MS = 10 * 60_000;
+
+/** The servers the user said yes to, kept in the shell's state. */
+export interface RecentConsentStore {
+  has(origin: string): boolean;
+  add(origin: string): void;
+  remove(origin: string): void;
+  clear(): void;
+}
+
+/**
+ * Whether a server may see the files the user opened recently. Main asks once per origin, in
+ * its own question window, with no as the default. A yes is kept in `store` until it's taken
+ * back; a no holds for RECENT_NO_HOLD_MS. One question at a time: a call while one is up gets
+ * that answer when it's about the same server, and a no when it's about another.
+ */
+export class RecentConsent {
+  private readonly refusedUntil = new Map<string, number>();
+  private open: { origin: string; answer: Promise<boolean> } | null = null;
+  private readonly now: () => number;
+
+  /** `ask`: the question, over `window` when there is one. True for yes. */
+  constructor(private readonly options: { store: RecentConsentStore; ask: (origin: string, window: unknown) => Promise<boolean>; now?: () => number }) {
+    this.now = options.now ?? Date.now;
+  }
+
+  allowed(origin: string): boolean {
+    return this.options.store.has(origin);
+  }
+
+  async decide(origin: string, window?: unknown): Promise<boolean> {
+    if (this.allowed(origin)) return true;
+    if ((this.refusedUntil.get(origin) ?? 0) > this.now()) return false;
+    if (this.open) return this.open.origin === origin ? this.open.answer : false;
+    // A question that fails to show is a no.
+    const answer = this.options.ask(origin, window).then((yes) => yes === true, () => false).then((yes) => {
+      if (yes) this.options.store.add(origin);
+      else this.refusedUntil.set(origin, this.now() + RECENT_NO_HOLD_MS);
+      return yes;
+    });
+    const open = { origin, answer };
+    this.open = open;
+    try {
+      return await answer;
+    } finally {
+      if (this.open === open) this.open = null;
+    }
+  }
+
+  /** Takes back a server's yes, or every one, and any no that holds: the next list asks again. */
+  forget(origin?: string): void {
+    if (origin === undefined) {
+      this.options.store.clear();
+      this.refusedUntil.clear();
+      return;
+    }
+    this.options.store.remove(origin);
+    this.refusedUntil.delete(origin);
+  }
+}
 /** Looked at for those 20: the newest shortcuts include folders, gone files and doubles. */
 export const RECENT_CANDIDATES_MAX = 60;
 

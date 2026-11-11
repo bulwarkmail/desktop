@@ -1867,6 +1867,8 @@ test.describe('a line of the page\'s own menu bar runs only on a click or key ma
     const profile = tempProfile('menu-twice');
     const { app, page } = await openHostile(profile, 'menu-twice');
     try {
+      // The user lets this server see recent files when asked: what's left to stop the second list is the click.
+      await fakeOsIntegration(app, 0);
       await expect.poll(() => lootOf('menu-ready').length, { timeout: 30_000 }).toBe(1);
       await page.mouse.click(400, 500);
       await expect.poll(() => lootOf('twice').length, { timeout: 20_000 }).toBe(1);
