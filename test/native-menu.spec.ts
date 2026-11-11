@@ -176,6 +176,20 @@ test.describe('the pure parts', () => {
     expect(holdsOsMenuLine([line('Paste', { role: 'paste', visible: false })]), 'a hidden line is in no menu').toBe(false);
   });
 
+  test('the page\'s bar runs a role only when it is known to bring nothing into the page: any other is the OS menu\'s', () => {
+    const line = (label: string, extra: Partial<BarSourceItem> = {}): BarSourceItem => ({ label, type: 'normal', enabled: true, visible: true, checked: false, ...extra });
+    for (const role of ['undo', 'redo', 'cut', 'copy', 'selectAll', 'selectall', 'togglefullscreen', 'close', 'quit', 'about']) expect(pageBarMayRun({ role }), role).toBe(true);
+    // Roles Electron has that no menu here uses, and one it doesn't have yet.
+    for (const role of ['startSpeaking', 'stopSpeaking', 'services', 'shareMenu', 'recentDocuments', 'toggleSpellChecker', 'showSubstitutions', 'reload', 'forceReload', 'toggleDevTools', 'delete', 'aRoleOfLater']) {
+      expect(pageBarMayRun({ role }), role).toBe(false);
+    }
+    for (const none of [{}, { role: null }, { role: '' }]) expect(pageBarMayRun(none), 'a line of the app\'s own').toBe(true);
+    const menu = [line('Undo', { role: 'undo' }), line('Share', { role: 'shareMenu' }), line('Zoom in', { id: 'view.zoomIn' })];
+    expect(barItemsOf(menu, '2').map((item) => [item.label, item.enabled])).toEqual([['Undo', true], ['Share', false], ['Zoom in', true]]);
+    expect(holdsOsMenuLine(menu)).toBe(true);
+    expect(holdsOsMenuLine([menu[0], menu[2]])).toBe(false);
+  });
+
   test('a label reads as text, with its marked letter', () => {
     expect(labelParts('&File')).toEqual({ text: 'File', mnemonic: 0 });
     expect(labelParts('Fi&le')).toEqual({ text: 'File', mnemonic: 2 });
@@ -2156,7 +2170,7 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
   test('the menu that has Paste opens as the OS\'s own, for a press in the top row or Alt and its letter, where main puts it', async () => {
     const profile = tempProfile('menu-os-edit');
     const { app, page } = await openInstance(profile, 'idle');
-    type Line = { key: string; id?: string; label: string; type: string; enabled: boolean; accelerator?: string };
+    type Line = { key: string; id?: string; label: string; type: string; enabled: boolean; accelerator?: string; items?: Line[] };
     type Bar = { menus: () => Promise<{ id: string; items: Line[] }[]>; open: (id: string, at: { x: number; y: number }) => void; report: (report: { height: number; active: boolean }) => void };
     const bar = { bulwarkDesktop: { menu: { bar: {} as Bar } } };
     try {
@@ -2189,6 +2203,14 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
       expect(byRole('paste')).toMatchObject({ enabled: false, label: 'Paste' });
       expect(byRole('paste')!.accelerator).toMatch(/\+V$/);
       for (const role of ['undo', 'redo', 'cut', 'copy', 'selectall']) expect.soft(byRole(role)?.enabled, role).toBe(true);
+      // Of every line the bar names by its role (Full screen and About among them), Paste alone is greyed.
+      const flat = (items: Line[]): Line[] => items.flatMap((item) => (item.items ? flat(item.items) : [item]));
+      const lines = menus.flatMap((menu) => flat(menu.items));
+      const roles = lines.filter((item) => item.id?.startsWith('role.'));
+      expect.soft(roles.map((item) => item.id!.toLowerCase()), 'roles in the bar').toEqual(expect.arrayContaining(['role.togglefullscreen', 'role.about']));
+      expect.soft(roles.filter((item) => !item.enabled).map((item) => item.id!.toLowerCase()), 'greyed roles').toEqual(['role.paste']);
+      // Close and Exit are roles under ids of their own.
+      for (const id of ['file.close', 'file.quit']) expect.soft(lines.find((item) => item.id === id)?.enabled, id).toBe(true);
 
       expect(await asked(), 'no input at all').toEqual([]);
 

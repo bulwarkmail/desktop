@@ -80,16 +80,24 @@ export interface BarSourceItem {
   getDefaultRoleAccelerator?: () => string | undefined | null;
 }
 
-/** Roles that put what's on the clipboard into the page. */
-const CLIPBOARD_IN_ROLES = new Set(['paste', 'pasteandmatchstyle']);
+/**
+ * The roles the bar a page draws may run: each works on the page's own content (its selection,
+ * its editing history) or on the window, and brings nothing into the page. Cut and Copy put the
+ * page's own selection on the clipboard, which a page can do itself at the same click or key.
+ */
+const PAGE_BAR_ROLES = new Set(['undo', 'redo', 'cut', 'copy', 'selectall', 'togglefullscreen', 'close', 'quit', 'about']);
 
 /**
  * Whether the bar a page draws may run a line. Which line was picked there is the page's
- * word, so a line that hands the page what's on the clipboard is left to the menus the OS
- * draws, where only the user can pick, and to the keys.
+ * word. A role does what Electron says it does, so only the roles known to hand the page
+ * nothing are the page's to run. Any other, Paste first of all (the clipboard's content
+ * arrives in the page) and any role this list doesn't know yet, is left to the menus the OS
+ * draws, where only the user can pick, and to the keys. A line with no role is the app's own
+ * (`MenuSection` in menu.ts says what such a line may do).
  */
 export function pageBarMayRun(item: { role?: string | null }): boolean {
-  return !CLIPBOARD_IN_ROLES.has((item.role ?? '').toLowerCase());
+  const role = (item.role ?? '').toLowerCase();
+  return role === '' || PAGE_BAR_ROLES.has(role);
 }
 
 /** Whether a menu has a line only the OS's own menu may run (`pageBarMayRun`), submenus included. */

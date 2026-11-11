@@ -41,7 +41,13 @@ export interface MenuHooks {
   open?: (window: BrowserWindow) => void;
 }
 
-/** Features add their own lines, such as "Restart to update". */
+/**
+ * Features add their own lines, such as "Restart to update". The bar a page draws runs a line
+ * on the page's word, at any click or key of the user's (`runBarItem`), so what a line's
+ * `click` does has to be safe at any of them: it hands the page nothing from outside the app,
+ * and changes nothing outside the app without a question of the OS's or the shell's in
+ * between. A line with a `role` runs from that bar only if `pageBarMayRun` knows the role.
+ */
 /** `new` sits right under New message in File, with no line of its own. */
 export type MenuSection = 'new' | 'file' | 'view' | 'help' | 'app';
 type Extension = () => MenuItemConstructorOptions[];
@@ -829,9 +835,10 @@ export class MenuController {
    * A line of the page's bar was picked: the same item the native menu has, clicked in that
    * window. Which line is the page's word, so main holds it to the click or key that reached
    * the window a moment ago, as main saw it, and notes no gesture of its own. One click or key
-   * runs one line. A letter runs only the line it's the underlined letter of. A line that hands
-   * the page what's on the clipboard never runs from here, whatever the page says about where
-   * it drew it (`pageBarMayRun`): it's in the menu the OS draws, and on its keys.
+   * runs one line. A letter runs only the line it's the underlined letter of. A line whose role
+   * is not known to be the page's to run, Paste first of all, never runs from here, whatever
+   * the page says about where it drew it (`pageBarMayRun`): it's in the menu the OS draws, and
+   * on its keys.
    */
   runBarItem(window: BrowserWindow, key: unknown, label: unknown): void {
     const menu = Menu.getApplicationMenu();
