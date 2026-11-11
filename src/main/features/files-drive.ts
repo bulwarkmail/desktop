@@ -4,7 +4,10 @@
  *
  * Only the main window's page may use these: a same-origin plugin frame reaches the bridge
  * through `parent`, and so do pop-outs, and none of them runs the sync engine. Turning the
- * drive on for the first time and choosing a letter take a real click, as main saw it.
+ * drive on for the first time and choosing a letter take a real click, as main saw it. A click
+ * isn't a yes, so the first time for a server and account main also asks, in its own question
+ * window with no as the default, naming the server and the folder. The yes is kept per server
+ * and account in the shell's state, and a letter is only ever set for a server with one.
  *
  * The folders live in `%USERPROFILE%\Bulwark Files\<address>`, where people look for them and
  * where OneDrive keeps its own. Not in the profile's AppData: Explorer's search and backup
@@ -19,7 +22,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { app, BrowserWindow, shell, type WebContents } from 'electron';
 import { CHANNEL, type FilesDriveState, type FilesFetchRequest, type OsCommand } from '../../shared/bridge';
 import { appLockGate } from '../app-lock-gate';
-import { DriveController, type DrivePolicy, type StoredDrive } from '../files/drive-controller';
+import { DriveController, type DriveConsent, type DrivePolicy, type StoredDrive } from '../files/drive-controller';
 import { helperLetters } from '../files/drive-letter';
 import { registryLetterLabels } from '../files/drive-letter-label';
 import { driveBase, driveProvider } from '../files/drive-places';
@@ -32,6 +35,7 @@ import { forgetRootState } from './files-folders';
 import { addWipeStep } from './local-wipe';
 import { appIconResource, taskIconsDir } from './os-tasks';
 import { policies } from './policies';
+import { showMessageBox } from '../message-box';
 import { strings } from '../strings';
 import type { Feature, FeatureContext } from '.';
 
@@ -101,8 +105,42 @@ function rescuedNotice(rescued: Rescued, reason: string): void {
   });
 }
 
+/**
+ * The user's yes per server and account, in the shell's state, and main's question for it. Its
+ * words are the shell's own (strings.ts): no label the page sent reaches them.
+ */
+function driveConsent(ctx: Pick<FeatureContext, 'state' | 'windows' | 'origin' | 'mode'>): DriveConsent {
+  const { state, origin } = ctx;
+  const stored = () => state.data.filesDriveConsent ?? [];
+  const keep = (next: { origin: string; account: string }[]) => {
+    state.data.filesDriveConsent = next;
+    state.save();
+  };
+  return {
+    has: (account) => stored().some((entry) => entry.origin === origin && (account === undefined || entry.account === account)),
+    add: (account) => keep([...stored().filter((entry) => !(entry.origin === origin && entry.account === account)), { origin, account }]),
+    remove: (account) => keep(stored().filter((entry) => !(entry.origin === origin && entry.account === account))),
+    clear: () => keep([]),
+    ask: async (_account, _label, folder) => {
+      const text = strings();
+      const options = {
+        type: 'question' as const,
+        message: ctx.mode === 'instance' ? text.driveAskTitle(new URL(origin).host) : text.driveAskTitleApp,
+        detail: text.driveAskDetail(folder),
+        buttons: [text.driveAskAllow, text.driveAskDeny],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      };
+      const parent = ctx.windows.mainWindow();
+      const { response } = await (parent && !parent.isDestroyed() ? showMessageBox(parent, options) : showMessageBox(options));
+      return response === 0;
+    },
+  };
+}
+
 /** The drive's controller, made once: the wipe can come before the feature starts. */
-function driveController(ctx?: Pick<FeatureContext, 'state' | 'windows' | 'showMain'>): DriveController | null {
+function driveController(ctx?: Pick<FeatureContext, 'state' | 'windows' | 'showMain' | 'origin' | 'mode'>): DriveController | null {
   if (process.platform !== 'win32') return null;
   if (controller) return controller;
   const helper = native().files;
@@ -186,6 +224,8 @@ function driveController(ctx?: Pick<FeatureContext, 'state' | 'windows' | 'showM
     letterLabels: helper && testArgument('letters') !== 'off' ? registryLetterLabels(registryRoot(), native().system.registry, (letter) => helper.filesDriveLetterChanged(letter)) : null,
     setPin: native().system.setPin,
     ...(testArgument('fetch-timeout') ? { fetchFirstAnswerMs: Number(testArgument('fetch-timeout')), fetchIdleMs: Number(testArgument('fetch-timeout')) } : {}),
+    // A wipe before the feature started has no page and nobody to ask: the setup clears the yes.
+    ...(ctx ? { consent: driveConsent(ctx) } : {}),
   });
   return controller;
 }
@@ -218,6 +258,7 @@ export const filesDriveFeature: Feature = {
     controller = null;
     if (wipedEarly) {
       delete ctx.state.data.filesDrive;
+      delete ctx.state.data.filesDriveConsent;
       ctx.state.save();
     }
     const drive = driveController(ctx)!;

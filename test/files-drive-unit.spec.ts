@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { FilesFetchRequest } from '../src/shared/bridge';
-import { DriveController, type StoredDrive } from '../src/main/files/drive-controller';
+import { DRIVE_NO_HOLD_MS, DriveController, type StoredDrive } from '../src/main/files/drive-controller';
 import { ALIGN, FetchRelay, PIECE } from '../src/main/files/drive-fetch';
 import { helperLetters, settleLetter, type LetterSystem } from '../src/main/files/drive-letter';
 import { isOurLabel, registryLetterLabels, type LetterLabel, type LetterLabelSystem } from '../src/main/files/drive-letter-label';
@@ -861,5 +861,180 @@ test.describe("another profile's Files drive", () => {
     expect(labels.get('Q')).toEqual(theirs);
     expect(map.get('Q')).toBe(path.win32.join(HOME, 'Bulwark Files', 'user@example.org'));
     expect(events.filter((event) => event.endsWith(' Q'))).toEqual([]);
+  });
+});
+
+test.describe('turning the drive on: a click, and then the user\'s yes', () => {
+  const PROFILE = 'C:\\profile';
+
+  /** A drive over a fake helper, with the question answered from `answers` (true is yes) and counted. */
+  function askingDrive(answers: boolean[], options: { stored?: StoredDrive; now?: () => number } = {}) {
+    const base = mkdtempSync(path.join(tmpdir(), 'bw-drive-ask-'));
+    const registered: string[] = [];
+    const native = {
+      filesDriveRoots: async () => registered.map((id) => ({ id, path: base, displayName: 'Bulwark Files' })),
+      filesDriveRegister: async (o: { provider: string; account: string }) => {
+        const id = `${o.provider}!S-1-5-21-1!${o.account}`;
+        if (!registered.includes(id)) registered.push(id);
+        return id;
+      },
+      filesDriveUnregister: async (id: string) => {
+        registered.splice(registered.indexOf(id), 1);
+      },
+      filesDriveConnect: () => 'c1',
+      filesDriveDisconnect: () => {},
+      filesDrivePlace: (_dir: string, batch: unknown[]) => batch.map(() => ''),
+      filesDriveInfo: () => {
+        throw new Error('files:missing');
+      },
+    } as unknown as NativeFilesModule;
+    const yes = new Set<string>();
+    const asked: { account: string; label: string; folder: string }[] = [];
+    const letters: LetterSystem = { list: async () => new Map(), add: async () => true, remove: async () => true, usedMask: () => 0 };
+    const store = { value: options.stored ?? ({} as StoredDrive) };
+    const drive = new DriveController({
+      native,
+      supported: true,
+      provider: 'Bulwark Test Unit',
+      base,
+      profile: PROFILE,
+      icon: 'x.ico,0',
+      version: '1',
+      store: { read: () => store.value, write: (next) => (store.value = next) },
+      policy: () => ({ forcedOff: false, letter: null }),
+      page: { fetch: () => true, fetchCancelled: () => {}, stateChanged: () => {} },
+      registry: { add: () => {}, remove: () => {} },
+      letters,
+      warn: () => {},
+      watchPins: false,
+      ...(options.now ? { now: options.now } : {}),
+      consent: {
+        has: (account) => (account === undefined ? yes.size > 0 : yes.has(account)),
+        add: (account) => yes.add(account),
+        remove: (account) => yes.delete(account),
+        clear: () => yes.clear(),
+        ask: async (account, label, folder) => {
+          asked.push({ account, label, folder });
+          return answers.shift() ?? false;
+        },
+      },
+    });
+    return { drive, base, registered, asked, yes, store, remove: () => rmSync(base, { recursive: true, force: true }) };
+  }
+
+  const click = () => true;
+  const noClick = () => false;
+
+  test('no click: refused before anything is asked; a click: the question names the folder, and a no makes nothing', async () => {
+    const { drive, base, registered, asked, remove } = askingDrive([false]);
+    try {
+      expect(await drive.enable('acct-1', 'alice@example.org', noClick)).toEqual({ ok: false, error: 'gesture' });
+      expect(asked).toEqual([]);
+      expect(await drive.enable('acct-1', 'alice@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      expect(asked).toEqual([{ account: 'acct-1', label: 'alice@example.org', folder: path.win32.join(realpathSync.native(base), 'alice@example.org') }]);
+      expect(registered).toEqual([]);
+      expect(drive.state().wanted).toEqual([]);
+    } finally {
+      remove();
+    }
+  });
+
+  test('after a no, five more clicks ask nothing until the no has run out; then a yes turns it on', async () => {
+    let now = 1_000_000;
+    const { drive, registered, asked, remove } = askingDrive([false, true], { now: () => now });
+    try {
+      await drive.enable('acct-1', 'alice@example.org', click);
+      for (let call = 0; call < 5; call += 1) expect(await drive.enable('acct-1', 'alice@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      expect(asked).toHaveLength(1);
+      now += DRIVE_NO_HOLD_MS + 1;
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      expect(asked).toHaveLength(2);
+      expect(registered).toHaveLength(1);
+    } finally {
+      remove();
+    }
+  });
+
+  test('a second account of the same server is asked for again: its folder is another', async () => {
+    const { drive, asked, remove } = askingDrive([true, false]);
+    try {
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      expect(await drive.enable('acct-2', 'bob@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      expect(asked.map((question) => path.win32.basename(question.folder))).toEqual(['alice@example.org', 'bob@example.org']);
+    } finally {
+      remove();
+    }
+  });
+
+  test('a label with path characters, a turned-round mark or 300 characters is cleaned before the question shows it', async () => {
+    const { drive, base, asked, remove } = askingDrive([false, false, false]);
+    try {
+      await drive.enable('acct-1', '..\\..\\Windows\\System32', click);
+      await drive.enable('acct-2', 'x'.repeat(300), click);
+      await drive.enable('acct-3', 'Invoices\u202Efdp.exe', click);
+      const real = realpathSync.native(base);
+      for (const { folder } of asked) expect(path.win32.dirname(folder), folder).toBe(real);
+      expect(asked.map((question) => path.win32.basename(question.folder))).toEqual(['.._.._Windows_System32', 'x'.repeat(120), 'Invoicesfdp.exe']);
+      // A label longer than the drive takes is refused before anything is asked.
+      expect(await drive.enable('acct-4', 'x'.repeat(321), click)).toEqual({ ok: false, error: 'failed' });
+      expect(asked).toHaveLength(3);
+    } finally {
+      remove();
+    }
+  });
+
+  test('the yes stays through a sign-out, so a sign-in brings the drive back with no click; turned off by the user, it asks again', async () => {
+    const { drive, asked, remove } = askingDrive([true, true]);
+    try {
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      await drive.disable('acct-1', 'signed-out');
+      expect((await drive.enable('acct-1', 'alice@example.org', noClick)).ok).toBe(true);
+      expect(asked).toHaveLength(1);
+      await drive.disable('acct-1', 'user');
+      expect(await drive.enable('acct-1', 'alice@example.org', noClick)).toEqual({ ok: false, error: 'gesture' });
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      expect(asked).toHaveLength(2);
+    } finally {
+      remove();
+    }
+  });
+
+  test('a wish stored with no yes for this server takes the click and the question too', async () => {
+    const stored: StoredDrive = { accounts: { 'acct-1': { label: 'alice@example.org', folder: 'alice@example.org', rootId: 'r1', createdAt: 1 } } };
+    const { drive, asked, remove } = askingDrive([true], { stored });
+    try {
+      expect(await drive.enable('acct-1', 'alice@example.org', noClick)).toEqual({ ok: false, error: 'gesture' });
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      expect(asked).toHaveLength(1);
+    } finally {
+      remove();
+    }
+  });
+
+  test('a drive letter only for a server with a yes, and a wipe takes every yes', async () => {
+    const { drive, yes, remove } = askingDrive([true]);
+    try {
+      expect(await drive.setLetter('Q', click)).toEqual({ ok: false, error: 'gesture' });
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      expect((await drive.setLetter('Q', click)).ok).toBe(true);
+      await drive.wipe();
+      expect(yes.size).toBe(0);
+      expect(await drive.setLetter('R', click)).toEqual({ ok: false, error: 'gesture' });
+    } finally {
+      remove();
+    }
+  });
+
+  test('placing takes names through the same check as every other path: no device name, no trailing dot or space', async () => {
+    const { drive, remove } = askingDrive([true]);
+    try {
+      const on = await drive.enable('acct-1', 'alice@example.org', click);
+      if (!on.ok) throw new Error(on.error);
+      const entry = (name: string) => ({ path: name, kind: 'file' as const, size: 1, mtimeMs: 1, identity: 'i' });
+      const placed = await drive.place(on.value.id, ['ok.txt', 'con', 'aux.txt', 'trailing.', 'trailing ', 'note:stream', '../out'].map(entry));
+      expect(placed).toEqual({ ok: true, value: [{ path: 'ok.txt' }, { path: 'con', error: 'name' }, { path: 'aux.txt', error: 'name' }, { path: 'trailing.', error: 'name' }, { path: 'trailing ', error: 'name' }, { path: 'note:stream', error: 'name' }, { path: '../out', error: 'outside' }] });
+    } finally {
+      remove();
+    }
   });
 });

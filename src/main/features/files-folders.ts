@@ -7,7 +7,8 @@
  * Who may call: a same-origin plugin frame can reach the bridge through `parent` (ipc.ts), so
  * - only the main window's page is answered, and the page takes the controls once, first;
  * - adding a folder takes a real click, spent as it's used, and the user's pick in the OS's
- *   own folder picker. Nothing else outlasts the run;
+ *   own folder picker. Nothing else outlasts the run. Showing a file in Explorer takes a
+ *   click of its own too;
  * - every path is resolved inside its root, and a link or junction on the way is refused, so
  *   no call reaches past the folders the user picked;
  * - while the app is locked nothing is listed, read or written.
@@ -463,9 +464,11 @@ export const filesFoldersFeature: Feature = {
       await store.saveState(rootId, state);
     });
 
-    handle(CHANNEL.filesShowInFolder, async (_event, window, rootId, relative) => {
+    handle(CHANNEL.filesShowInFolder, async (event, window, rootId, relative) => {
       const root = await rootFor(window, rootId);
       if (!root) return false;
+      // An Explorer window opens only on a click or key press main saw, one per click.
+      if (!takeUserGesture(event.sender)) return false;
       const found = await disk.resolve(root, relative ?? '', true);
       if (!found.ok || !found.value.stats) return false;
       // The root itself opens; anything in it is shown selected in its folder.

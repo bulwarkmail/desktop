@@ -181,7 +181,7 @@ test('a path through a junction is refused, and a scan leaves the junction out',
   expect(await files<Answer>(page, 'openRead', root.id, 'way-out/secret.txt')).toEqual({ ok: false, error: 'outside' });
   expect(await files<Answer>(page, 'beginWrite', root.id, 'way-out/planted.txt', { expect: null, mtimeMs: 1, size: 1 })).toEqual({ ok: false, error: 'outside' });
   expect(await files<Answer>(page, 'remove', root.id, 'way-out', null)).toEqual({ ok: false, error: 'outside' });
-  expect(await files<Answer>(page, 'showInFolder', root.id, 'way-out/secret.txt')).toBe(false);
+  expect(await clicked<Answer>('showInFolder', root.id, 'way-out/secret.txt')).toBe(false);
   const scanned = await files<Answer<Entry[]>>(page, 'scan', root.id);
   expect(scanned.value!.map((entry) => entry.path).sort()).toEqual(['already-here.txt', 'inner']);
   expect(readdirSync(elsewhere)).toEqual(['secret.txt']);
@@ -226,7 +226,11 @@ test('write, read, move and remove go round, and the watcher reports what change
   writeFileSync(path.join(root.path, 'docs', 'B.txt'), 'b');
   expect(await files<Answer>(page, 'move', root.id, 'docs/A.txt', 'docs/B.txt', null)).toEqual({ ok: false, error: 'exists' });
 
-  expect(await files<boolean>(page, 'showInFolder', root.id, 'docs/A.txt')).toBe(true);
+  // Explorer opens only on a click main saw: a script alone opens nothing, the folder itself included.
+  expect(await files<boolean>(page, 'showInFolder', root.id, 'docs/A.txt')).toBe(false);
+  expect(await files<boolean>(page, 'showInFolder', root.id, '')).toBe(false);
+  expect(await mainGlobal<string[]>('__shown')).toEqual([]);
+  expect(await clicked<boolean>('showInFolder', root.id, 'docs/A.txt')).toBe(true);
   expect(await mainGlobal<string[]>('__shown')).toEqual([path.join(root.path, 'docs', 'A.txt')]);
 
   expect(await files<Answer>(page, 'remove', root.id, 'docs/A.txt', { ...expectOf(moved.value!), size: 99 })).toEqual({ ok: false, error: 'changed' });

@@ -11,6 +11,7 @@ import { lstatSync, type BigIntStats } from 'node:fs';
 import path from 'node:path';
 import type { FilesDriveStatus, FilesError, FilesLocalEntry, FilesPlaceholderState } from '../../shared/bridge';
 import type { NativeDriveStatus } from '../native-loader';
+import { splitRelative } from './paths';
 
 export const DRIVE_PROVIDER = 'Bulwark';
 /** A test build's own, as it has an AppUserModelID of its own: its sync roots are never the installed app's. */
@@ -115,9 +116,12 @@ export function displayNameFor(label: string, accounts: number): string {
 
 const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
-/** A folder name for an address that Windows can hold, unlike any in `taken` (case aside). */
+/**
+ * A folder name for an address that Windows can hold, unlike any in `taken` (case aside). It is
+ * shown in the question before the drive is made, so marks that turn text round go too.
+ */
 export function folderNameFor(label: string, taken: readonly string[]): string {
-  let name = label.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '').trim().slice(0, 120);
+  let name = label.replace(/[‎‏‪-‮⁦-⁩]/g, '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '').trim().slice(0, 120);
   if (!name || RESERVED.test(name)) name = `_${name || 'account'}`;
   const lower = new Set(taken.map((entry) => entry.toLowerCase()));
   if (!lower.has(name.toLowerCase())) return name;
@@ -144,12 +148,14 @@ export function relativeParts(relative: unknown): string[] | null {
 export type Resolved = { ok: true; absolute: string; parts: string[] } | { ok: false; error: FilesError };
 
 /**
- * A path under a root, as an absolute path. Refused when it leaves the root, or when a folder
- * on the way is a link or a junction: something on the other end isn't the drive's.
+ * A path under a root, as an absolute path. Refused when it leaves the root, when a part is a
+ * name Windows can't hold as a file (`splitRelative`, as for every other files path), or when a
+ * folder on the way is a link or a junction: something on the other end isn't the drive's.
  */
 export function resolveUnder(rootDir: string, relative: unknown, lstat: (file: string) => { isSymbolicLink(): boolean } | null = lstatOrNull): Resolved {
-  const parts = relativeParts(relative);
-  if (!parts) return { ok: false, error: 'outside' };
+  const checked = splitRelative(relative, 'win32');
+  if (!checked.ok) return checked;
+  const { parts } = checked;
   let at = rootDir;
   for (const part of parts) {
     at = path.win32.join(at, part);

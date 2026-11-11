@@ -122,6 +122,8 @@ export interface ShellState {
   importJobs?: StoredImportJob[];
   /** The Files drive: the accounts the user turned it on for, and the letter they chose. */
   filesDrive?: StoredDrive;
+  /** The servers and accounts the user said may keep a Files drive here (features/files-drive.ts). */
+  filesDriveConsent?: { origin: string; account: string }[];
   /** The print preview's last destination and the choices per destination (print-rules.ts). */
   print?: PrintMemory;
 }

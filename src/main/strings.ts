@@ -354,6 +354,11 @@ const en = {
   recentAskDetail: 'The page gets the names, folders and sizes of the last 20 files you opened in any program, and the content of one when you pick it to attach. A plugin may be asking.',
   recentAskAllow: 'Show recent files',
   recentAskDeny: "Don't allow",
+  driveAskTitle: (host: string) => `Let ${host} keep a folder of your files on this computer?`,
+  driveAskTitleApp: 'Keep a folder of the files of this account on this computer?',
+  driveAskDetail: (folder: string) => `This makes ${folder} and shows it in File Explorer, as OneDrive does. The server decides what goes in it, files of any kind included, and they open like your own. Only allow this for a server you trust with your files. A plugin may be asking.`,
+  driveAskAllow: 'Make the folder',
+  driveAskDeny: "Don't allow",
 };
 
 const de: typeof en = {
@@ -374,6 +379,11 @@ const de: typeof en = {
   recentAskDetail: 'Die Seite erhält Namen, Ordner und Größe der letzten 20 Dateien, die Sie in einem beliebigen Programm geöffnet haben, und den Inhalt einer Datei, wenn Sie sie zum Anhängen auswählen. Möglicherweise fragt ein Plugin.',
   recentAskAllow: 'Zuletzt verwendete Dateien zeigen',
   recentAskDeny: 'Nicht zulassen',
+  driveAskTitle: (host) => `${host} einen Ordner mit Ihren Dateien auf diesem Computer anlegen lassen?`,
+  driveAskTitleApp: 'Einen Ordner mit den Dateien dieses Kontos auf diesem Computer anlegen?',
+  driveAskDetail: (folder) => `Damit entsteht ${folder}, und der Explorer zeigt den Ordner wie OneDrive. Was darin liegt, bestimmt der Server, auch Dateien jeder Art, und sie öffnen sich wie Ihre eigenen. Lassen Sie das nur für einen Server zu, dem Sie Ihre Dateien anvertrauen. Möglicherweise fragt ein Plugin.`,
+  driveAskAllow: 'Ordner anlegen',
+  driveAskDeny: 'Nicht zulassen',
   unsavedTitle: 'Ein Entwurf konnte nicht gespeichert werden',
   unsavedDetail: 'Wenn Sie jetzt schließen, geht verloren, was Sie seit dem letzten Speichern geschrieben haben.',
   closeAnyway: 'Trotzdem schließen',
@@ -709,10 +719,10 @@ let labels: Partial<typeof en> = {};
 
 /**
  * The questions that ask the user to allow something: switching to the beta channel or back
- * to an older version, recent files. Their text is the shell's own, in English or German,
- * whatever labels the page sent: the page that asks never words the question.
+ * to an older version, recent files, the Files drive. Their text is the shell's own, in English
+ * or German, whatever labels the page sent: the page that asks never words the question.
  */
-const CONSENT_KEY = /^(updateBeta|updateOlder|recentAsk)/;
+const CONSENT_KEY = /^(updateBeta|updateOlder|recentAsk|driveAsk)/;
 
 /** Keeps what fits: a known key with text, of a sane length, no function replaced and no question that asks for consent. */
 export function cleanLabels(raw: unknown): Record<string, string> {

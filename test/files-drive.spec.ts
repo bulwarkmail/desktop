@@ -1,11 +1,12 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test, type ElectronApplication, type Page } from '@playwright/test';
 import { helperFile, loadHelperModule, type NativeFilesModule } from '../src/main/native-loader';
-import { launchStandalone, removeProfile, tempProfile, waitForLogin } from './helpers';
+import { fakeOsIntegration, launch, launchStandalone, prompts, removeProfile, shownPage, tempProfile, waitForLogin } from './helpers';
+import { DROPPED, startHostileInstance, type HostileInstance } from './support/hostile-instance-2';
 
 /**
  * The Files drive's channels in the real app: only the main window's page gets them, turning
@@ -85,15 +86,32 @@ test('only the main window gets the drive: a pop-out of the same origin is refus
   expect(await ourRoots()).toEqual([]);
 });
 
-test('turning the drive on takes a real click; a script alone gets gesture and nothing registers', async () => {
+test('turning the drive on takes a real click and the yes to main\'s question; a script alone gets gesture and nothing registers', async () => {
   expect(await page.evaluate(`window.__files.drive.enable(${JSON.stringify(ACCOUNT)}, ${JSON.stringify(LABEL)})`)).toEqual({ ok: false, error: 'gesture' });
   expect(await ourRoots()).toEqual([]);
 
+  // The user says yes when asked, and the question names the folder.
+  await fakeOsIntegration(app, 0);
   await page.mouse.click(200, 400);
   const on = (await page.evaluate(`window.__files.drive.enable(${JSON.stringify(ACCOUNT)}, ${JSON.stringify(LABEL)})`)) as { ok: boolean; value: { id: string; path: string; kind: string } };
   expect(on).toMatchObject({ ok: true, value: { kind: 'drive', path: path.join(BASE, 'drive', LABEL) } });
   expect(await ourRoots()).toHaveLength(1);
   expect(await page.evaluate('window.__files.drive.state().then((state) => state.wanted)')).toEqual([ACCOUNT]);
+  const asked = await prompts(app);
+  expect(asked).toHaveLength(1);
+  expect(asked[0].detail).toContain(path.join(BASE, 'drive', LABEL));
+
+  // Explorer opens on the folder only on a click main saw.
+  await app.evaluate(({ shell }) => {
+    const g = globalThis as unknown as { __openedPaths: string[] };
+    g.__openedPaths = [];
+    shell.openPath = async (target: string) => {
+      g.__openedPaths.push(target);
+      return '';
+    };
+  });
+  expect(await page.evaluate(`window.__files.showInFolder(${JSON.stringify(on.value.id)}, '')`)).toBe(false);
+  expect(await app.evaluate(() => (globalThis as unknown as { __openedPaths: string[] }).__openedPaths)).toEqual([]);
 });
 
 test("a file another program opens is fetched through the page's supply", async () => {
@@ -127,6 +145,8 @@ test('turned off by the user: the sync root and its folder go, and the wish with
 });
 
 test('FilesDriveEnabled forced off, live: the drive goes at once and the wish stays for when it is on again', async () => {
+  // Turned off by the user before: turning it on asks again, and the user says yes.
+  await fakeOsIntegration(app, 0);
   await page.mouse.click(200, 400);
   expect(await page.evaluate(`window.__files.drive.enable(${JSON.stringify(ACCOUNT)}, ${JSON.stringify(LABEL)}).then((answer) => answer.ok)`)).toBe(true);
   expect(await ourRoots()).toHaveLength(1);
@@ -149,4 +169,65 @@ test('FilesDriveEnabled forced off, live: the drive goes at once and the wish st
   // Back on: the wish brings it back without a click, as at a sign-in.
   expect(await page.evaluate(`window.__files.drive.enable(${JSON.stringify(ACCOUNT)}, ${JSON.stringify(LABEL)}).then((answer) => answer.ok)`)).toBe(true);
   expect(await ourRoots()).toHaveLength(1);
+});
+
+test.describe('clicks on an instance\'s page are not a yes to a folder of its files on this computer', () => {
+  // An instance whose page turns the drive on at any click and writes files into it
+  // (test/support/hostile-instance-2.ts). Every question is answered no.
+  const ASK_PROVIDER = `Bulwark Test Ask ${process.pid}`;
+  const ASK_BASE = path.join(tmpdir(), `bulwark-files-ask-${process.pid}`);
+  const askRoots = async () => (await helper().filesDriveRoots()).filter((root) => root.id.startsWith(`${ASK_PROVIDER}!`));
+  let hostile: HostileInstance;
+
+  test.beforeAll(async () => {
+    hostile = await startHostileInstance(3843);
+  });
+  test.afterAll(async () => {
+    hostile?.close();
+    for (const root of await askRoots()) await helper().filesDriveUnregister(root.id).catch(() => {});
+    rmSync(ASK_BASE, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+
+  test('five clicks, every question answered no: no sync root, none of the page\'s files on disk, no Explorer window', async () => {
+    const lootOf = (kind: string) => hostile.loot.filter((entry) => entry.kind === kind).map((entry) => entry.body);
+    const askProfile = tempProfile('files-drive-ask');
+    hostile.loot.length = 0;
+    hostile.mode = 'drive';
+    const instance = await launch(askProfile, `--instance=${hostile.origin}/`, '--ignore-certificate-errors', `--bulwark-test-files-provider=${ASK_PROVIDER}`, `--bulwark-test-files-drive-dir=${path.join(ASK_BASE, 'drive')}`, '--bulwark-test-files-letters=off');
+    try {
+      const shown = await shownPage(instance);
+      await instance.evaluate(({ app: electronApp, shell }) => {
+        electronApp.relaunch = () => undefined;
+        const g = globalThis as unknown as { __openedPaths: string[] };
+        g.__openedPaths = [];
+        shell.openPath = async (target: string) => {
+          g.__openedPaths.push(target);
+          return '';
+        };
+        shell.showItemInFolder = (target: string) => {
+          g.__openedPaths.push(target);
+        };
+      });
+      await fakeOsIntegration(instance, 1);
+      await expect.poll(() => lootOf('bridge').length).toBeGreaterThan(0);
+      for (let click = 0; click < 5; click += 1) {
+        await shown.mouse.click(400, 500);
+        await shown.waitForTimeout(700);
+      }
+      // Time for the page's writes, had they been allowed.
+      await shown.waitForTimeout(3000);
+      const folder = path.join(ASK_BASE, 'drive', 'Invoices 2026');
+      const found = existsSync(folder) ? readdirSync(folder) : [];
+      expect.soft(found.filter((name) => DROPPED.some((file) => file.path === name)), 'files the page wrote').toEqual([]);
+      expect.soft(await askRoots(), 'sync roots registered with Windows').toEqual([]);
+      expect.soft(await instance.evaluate(() => (globalThis as unknown as { __openedPaths: string[] }).__openedPaths), 'folders Explorer was asked to open').toEqual([]);
+      // Asked once, naming the server and the folder; the no holds for the clicks after it.
+      const asked = await prompts(instance);
+      expect(asked.map((question) => question.message)).toEqual([`Let ${new URL(hostile.origin).host} keep a folder of your files on this computer?`]);
+      expect(asked[0].detail).toContain(path.join(ASK_BASE, 'drive', 'Invoices 2026'));
+    } finally {
+      await instance.close().catch(() => {});
+      removeProfile(askProfile);
+    }
+  });
 });
