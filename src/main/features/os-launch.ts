@@ -168,7 +168,7 @@ export function setupLaunch(hub: OsHub): LaunchHandle {
   first.files.push(...early.files);
   early.urls.length = 0;
   early.files.length = 0;
-  if ((first.fromLogin || wasAtLogin) && hub.settings().startMinimized && first.commands.length === 0 && first.links.length === 0 && first.files.length === 0) {
+  if ((first.fromLogin || wasAtLogin) && hub.settings().startMinimized && !hub.startedForRestart && first.commands.length === 0 && first.links.length === 0 && first.files.length === 0) {
     hub.ctx.windows.startMainHidden();
   }
   // With close to tray off the user has no reason to look there, so the window shows.

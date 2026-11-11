@@ -37,6 +37,11 @@ export class OsHub extends EventEmitter<{
   private summaryNow: OsSummary = EMPTY_SUMMARY;
   private badgeNow = 0;
   shortcutActive = false;
+  /**
+   * This start came from the login entry made for "Open again after a restart" alone: the
+   * user hasn't asked to start at login, so their "Start in the tray" doesn't apply.
+   */
+  startedForRestart = false;
   /** Opens the quick composer: os-quick-compose.ts. */
   quickCompose: (() => void) | null = null;
   quickComposeStatus: QuickComposeStatus | undefined;

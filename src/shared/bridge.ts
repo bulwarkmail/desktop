@@ -460,6 +460,11 @@ export interface OsSettings {
   startAtLogin: boolean;
   /** At login: no window, only the tray. */
   startMinimized: boolean;
+  /**
+   * Running when the computer restarts or the user signs out: the app starts again at the next
+   * sign-in, on the page the main window showed (features/os-restart.ts).
+   */
+  reopenAfterRestart: boolean;
   /** Taskbar flash or dock bounce on new mail. */
   attentionOnNewMail: boolean;
   quietHoursEnabled: boolean;

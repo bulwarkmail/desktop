@@ -25,6 +25,7 @@ import { setupFeatures, type FeatureContext } from './features';
 import { registerImportScheme } from './features/import';
 import { holdEarlyLaunches } from './features/os-launch';
 import { appUserModelId, electronRegistersScheme } from './features/os-rules';
+import { takeResumeUrl } from './resume-rules';
 import { setToastActivator } from './features/os-toasts';
 import { holdUpdateInstall } from './features/updater';
 import { addRestartTimers, askToRestart, policies } from './features/policies';
@@ -537,7 +538,8 @@ async function bootStandaloneServer(theme: ThemeController): Promise<void> {
   // Once: the first screen's address fills the sign-in page, and only on this start.
   const email = welcomeEmail;
   welcomeEmail = null;
-  windows.open({ type: 'main', url: firstPageUrl(APP_ORIGIN, email) });
+  // After a restart with "Open again after a restart" on: the page it was on (features/os-restart.ts).
+  windows.open({ type: 'main', url: takeResumeUrl(stateFile, 'standalone', APP_ORIGIN, Date.now()) ?? firstPageUrl(APP_ORIGIN, email) });
 
   try {
     const ready = await server.ready;
@@ -585,7 +587,7 @@ async function bootInstance(instanceUrl: string, theme: ThemeController): Promis
   setupFeatures(ctx);
   windows.on('created', ({ window }) => watchForFailedLoads(window, origin, instanceUrl));
   mainWindowAllowed = true;
-  windows.open({ type: 'main', url: instanceUrl });
+  windows.open({ type: 'main', url: takeResumeUrl(stateFile, 'instance', origin, Date.now()) ?? instanceUrl });
 }
 
 /** The first-run window's width; its height follows the page's card. */

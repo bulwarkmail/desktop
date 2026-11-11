@@ -8,6 +8,7 @@ import path from 'node:path';
 import type { Mode, OsSettings, ThemeColours, UpdateChannel, WindowType } from '../shared/bridge';
 import type { StoredDrive } from './files/drive-controller';
 import type { PrintMemory } from './print-rules';
+import type { ResumeMark } from './resume-rules';
 
 export interface StoredBounds {
   x: number;
@@ -83,6 +84,8 @@ export interface ShellState {
   restoreWindows?: boolean;
   /** Starts in a row that began restoring and didn't get far. */
   restoreAttempts?: number;
+  /** The main window's page when the computer restarted, with "Open again after a restart" on. */
+  resumeAfterRestart?: ResumeMark;
   /** When a pop-out last opened: whether a warm spare is worth its memory. */
   lastPopoutAt?: number;
   /** Chromium's zoom level: 0 is 100%. */

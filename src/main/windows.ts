@@ -194,6 +194,8 @@ export class WindowManager extends EventEmitter<{
   sessionEnded: [];
   /** A window went to another document: what its old page said no longer holds. */
   navigated: [BrowserWindow];
+  /** Windows is ending the session: a restart, a shutdown or a sign-out. Once. */
+  sessionEnding: [];
 }> {
   private readonly windows = new Map<number, ManagedWindow>();
   private lastFocused: number | null = null;
@@ -619,6 +621,7 @@ export class WindowManager extends EventEmitter<{
     if (this.savingForSessionEnd) return;
     this.savingForSessionEnd = true;
     this.quitting = true;
+    this.emit('sessionEnding');
     this.options.state.save();
     void this.flushAll();
   }
@@ -975,6 +978,7 @@ export class WindowManager extends EventEmitter<{
     this.savedSession = [];
     delete state.data.session;
     delete state.data.restoreAttempts;
+    delete state.data.resumeAfterRestart;
     state.save();
   }
 

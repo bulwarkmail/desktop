@@ -38,6 +38,7 @@ export function defaultSettings(platform: NodeJS.Platform, env: NodeJS.ProcessEn
     closeToTray: !noTray,
     startAtLogin: false,
     startMinimized: false,
+    reopenAfterRestart: false,
     attentionOnNewMail: true,
     quietHoursEnabled: false,
     quietHoursStart: '22:00',
@@ -128,7 +129,7 @@ export function isAccelerator(value: unknown, platform: string = process.platfor
 export function cleanSettingsPatch(patch: unknown): Partial<OsSettings> {
   const input = (patch && typeof patch === 'object' ? patch : {}) as Record<string, unknown>;
   const out: Partial<OsSettings> = {};
-  for (const key of ['closeToTray', 'startAtLogin', 'startMinimized', 'attentionOnNewMail', 'quietHoursEnabled'] as const) {
+  for (const key of ['closeToTray', 'startAtLogin', 'startMinimized', 'reopenAfterRestart', 'attentionOnNewMail', 'quietHoursEnabled'] as const) {
     if (typeof input[key] === 'boolean') out[key] = input[key];
   }
   for (const key of ['quietHoursStart', 'quietHoursEnd'] as const) {
@@ -142,13 +143,19 @@ export function cleanSettingsPatch(patch: unknown): Partial<OsSettings> {
   return out;
 }
 
+/** These start the app with the OS, which outlasts this run and the page that asked. */
+const STARTS_WITH_OS = ['startAtLogin', 'reopenAfterRestart'] as const;
+
 /**
  * Starting with the OS is persistence: it outlasts this run and the page that asked. A same-origin
  * plugin frame can make this call, so turning it on takes a real click. Turning it off doesn't.
  */
 export function settingsAllowedWithoutClick(patch: unknown, clicked: boolean): unknown {
-  if (clicked || !patch || typeof patch !== 'object' || (patch as { startAtLogin?: unknown }).startAtLogin !== true) return patch;
-  const { startAtLogin: _left, ...rest } = patch as Record<string, unknown>;
+  if (clicked || !patch || typeof patch !== 'object') return patch;
+  const input = patch as Record<string, unknown>;
+  if (!STARTS_WITH_OS.some((key) => input[key] === true)) return patch;
+  const rest = { ...input };
+  for (const key of STARTS_WITH_OS) if (rest[key] === true) delete rest[key];
   return rest;
 }
 

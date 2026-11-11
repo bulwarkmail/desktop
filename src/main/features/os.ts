@@ -18,6 +18,7 @@ import { OsHub } from './os-hub';
 import { setupLaunch } from './os-launch';
 import { addWipeStep } from './local-wipe';
 import { applyLoginItem, readLoginItem, setupLogin } from './os-login';
+import { setupRestart } from './os-restart';
 import { setupPower } from './os-power';
 import { setupQuickCompose } from './os-quick-compose';
 import { setupRecentFiles } from './os-recent';
@@ -110,6 +111,8 @@ function setup(ctx: FeatureContext): void {
     platform: process.platform,
     driveOn: driveHooks().running?.() ?? false,
   }));
+  // Before the launch: a start for a restart shows its window.
+  setupRestart(hub, applyLoginItem);
   const launch = setupLaunch(hub);
   const saveOpen = setupSaveOpen(hub, launch);
   const defaultApp = setupDefaultApp(hub);
