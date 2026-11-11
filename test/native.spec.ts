@@ -4,7 +4,8 @@ import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { helperFile, loadHelperModule, type NativeCertificate, type NativeModule } from '../src/main/native-loader';
 import { readPe } from './pe-reader';
-import { TestCerts, type TestCert } from './test-certs';
+import { TestCerts, type TestCert } from './test-certs';
+
 import { EXPORTS } from './native-exports';
 
 /**
@@ -135,6 +136,16 @@ test.describe('policy', () => {
     expect(() => native.policyIsForced('')).toThrow(/bad key/);
     expect(() => native.policyIsForced('a key with spaces')).toThrow(/bad key/);
     expect(() => native.policyIsForced('x'.repeat(129))).toThrow(/bad key/);
+  });
+});
+
+test.describe('Windows\u2019 print dialog', () => {
+  test('a handle that is no window is refused before any dialog, and a PDF must have bytes', async () => {
+    const native = load() as NativeModule & { printDialog(hwnd: Buffer, pdf: Buffer, landscape: Buffer | undefined, title: string): Promise<string> };
+    const pdf = Buffer.from('%PDF-1.4\n%%EOF\n');
+    expect(await native.printDialog(Buffer.alloc(8), pdf, undefined, 'Test')).toBe(process.platform === 'win32' ? 'invalid' : 'unavailable');
+    expect(() => native.printDialog(Buffer.alloc(8), Buffer.alloc(2), undefined, 'Test')).toThrow(/PDF/);
+    expect(() => native.printDialog(Buffer.alloc(8), pdf, Buffer.alloc(0), 'Test')).toThrow(/PDF/);
   });
 });
 

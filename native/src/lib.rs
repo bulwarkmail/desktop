@@ -24,6 +24,10 @@ mod files;
 #[cfg_attr(not(windows), path = "files_status_none.rs")]
 mod files_status;
 
+#[cfg_attr(windows, path = "print_windows.rs")]
+#[cfg_attr(not(windows), path = "print_none.rs")]
+mod print;
+
 #[cfg_attr(windows, path = "system_windows.rs")]
 #[cfg_attr(not(windows), path = "system_none.rs")]
 mod system;
@@ -418,6 +422,52 @@ pub fn policy_is_forced(key: String) -> Result<bool> {
         return Err(Error::from_reason("policy: bad key"));
     }
     Ok(os::policy_is_forced(&key))
+}
+
+// ─── Windows' print dialog ───────────────────────────────────
+
+const MAX_PRINT_PDF: usize = 200 * 1024 * 1024;
+const MAX_PRINT_TITLE: usize = 256;
+
+pub struct PrintDialogTask {
+    dialog: Option<print::Dialog>,
+    refused: &'static str,
+}
+
+impl Task for PrintDialogTask {
+    type Output = &'static str;
+    type JsValue = String;
+
+    fn compute(&mut self) -> Result<&'static str> {
+        Ok(self.dialog.as_ref().map_or(self.refused, print::Dialog::wait))
+    }
+
+    fn resolve(&mut self, _env: Env, output: &'static str) -> Result<String> {
+        // Back on the JS thread, the window's: the dialog's registration goes here.
+        if let Some(dialog) = self.dialog.take() {
+            dialog.close();
+        }
+        Ok(output.to_string())
+    }
+}
+
+/// Windows' print dialog over a window, for a PDF, with its pages in the dialog's preview.
+/// `landscape`: the same document laid out for landscape, used when the dialog picks it.
+/// Opened right here, on the JS thread, which owns the app's windows: Windows wants that.
+/// Resolves when the dialog is closed and a job is with the spooler: `printed`, `cancelled`,
+/// `failed`, `unavailable` (no dialog: off Windows, or Windows wouldn't show one) or `invalid`.
+#[napi]
+pub fn print_dialog(hwnd: Buffer, pdf: Buffer, landscape: Option<Buffer>, title: String) -> Result<AsyncTask<PrintDialogTask>> {
+    for data in std::iter::once(&pdf).chain(landscape.as_ref()) {
+        if data.len() < 5 || data.len() > MAX_PRINT_PDF {
+            return Err(Error::from_reason("print: a PDF must be 5 bytes to 200 MB"));
+        }
+    }
+    let title: String = title.chars().take(MAX_PRINT_TITLE).collect();
+    Ok(AsyncTask::new(match print::show(&hwnd, pdf.to_vec(), landscape.map(|data| data.to_vec()), title) {
+        Ok(dialog) => PrintDialogTask { dialog: Some(dialog), refused: "" },
+        Err(word) => PrintDialogTask { dialog: None, refused: word },
+    }))
 }
 
 // ─── Window to the front ─────────────────────────────────────

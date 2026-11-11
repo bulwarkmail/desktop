@@ -42,6 +42,7 @@ export const EXPORTS = [
   'keystoreSign',
   'notificationQuietState',
   'policyIsForced',
+  'printDialog',
   'registryDeleteKey',
   'registryDeleteValue',
   'registryRead',

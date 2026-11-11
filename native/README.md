@@ -54,6 +54,7 @@ This is the whole surface. `test/native.spec.ts` fails if the binary exports any
 - `fileSetPin(path, pin)`: promise. The pin attributes, `pinned`, `unpinned` or `unspecified`, as `attrib +P -U`, `-P +U` and `-P -U` set them.
 - `windowToFront(hwnd)`: puts one of this process's windows in front, as a click on its toast asks, where SetForegroundWindow alone would only flash its taskbar button: an empty mouse input first makes this process the one with the last input. True when the window is in front. False elsewhere.
 - `codeSignatureCheck(path)`: promise of `{ status, code, subject? }`: a file's embedded Authenticode signature through WinVerifyTrust (`valid`, `unsigned` or `invalid`, with Windows' code) and its signer as .NET's X509Certificate.Subject shows it. No revocation check over the network. For an update's installer, where electron-updater would start PowerShell's Get-AuthenticodeSignature.
+- `printDialog(hwnd, pdf, landscape?, title)`: Windows' print dialog over a window for a PDF, with the PDF's pages in the dialog's preview and in the job, drawn by Windows' own PDF renderer. `landscape` is the same document laid out for landscape, which the dialog's landscape uses. Opened on the JS thread, which owns the app's windows, as Windows requires. Promise of `printed`, `cancelled`, `failed`, `unavailable` (off Windows, or Windows wouldn't show the dialog) or `invalid` (no window).
 <!-- /exports -->
 
 macOS Touch ID needs no helper: Electron has `systemPreferences.promptTouchID`.
