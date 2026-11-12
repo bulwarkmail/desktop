@@ -9,6 +9,7 @@ import type { Mode, OsSettings, ThemeColours, UpdateChannel, WindowType } from '
 import type { StoredDrive } from './files/drive-controller';
 import type { PrintMemory } from './print-rules';
 import type { ResumeMark } from './resume-rules';
+import type { PendingRemoval } from './wipe-scope';
 
 export interface StoredBounds {
   x: number;
@@ -102,6 +103,8 @@ export interface ShellState {
   policyWipes?: string[];
   /** Every partition this profile has used: the policy's wipe covers them all, a server's wipe its own. */
   partitions?: string[];
+  /** Wiped partitions whose folder goes at the next start, before any session has it (wipe-scope.ts). */
+  partitionsToRemove?: PendingRemoval[];
   /** A hash of the key DPAPI stopped opening, once the user was told their sign-ins went with it. */
   keyLossTold?: string;
   /** Instances the user said may use the OS keystore. Revocable in the webmail's settings. */

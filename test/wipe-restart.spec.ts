@@ -1,6 +1,6 @@
-import type { ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { expect, test, type ElectronApplication, type Page } from '@playwright/test';
 import { APP_ORIGIN, fakeOsIntegration, launch, launchStandalone, removeProfile, shownPage, tempProfile, waitForLogin } from './helpers';
@@ -416,6 +416,219 @@ test.describe("a server's page wipes its own server", () => {
     }, own);
   }
 });
+
+// What a wipe covers goes completely. The clear calls leave the partition's folder, and in it the
+// network state Chromium keeps names every server the app talked to. The folder goes at the next
+// start, before any session opens it.
+test.describe('what a wipe covers goes completely', () => {
+  let first: HostileInstance;
+  let second: HostileInstance;
+
+  test.beforeAll(async () => {
+    // HTTP/2, as a mail server speaks it: Chromium keeps such a server in its network state.
+    first = await startHostileInstance(3851, { http2: true });
+    second = await startHostileInstance(3852, { http2: true });
+  });
+  test.afterAll(() => {
+    first?.close();
+    second?.close();
+  });
+
+  const b64 = (server: HostileInstance) => Buffer.from(server.origin).toString('base64url');
+  const partitionName = (server: HostileInstance) => `persist:instance-${b64(server)}`;
+  const partitionDir = (profile: string, server: HostileInstance) => path.join(profile, 'Partitions', `instance-${b64(server).toLowerCase()}`);
+  /** How a profile can name the server: its host and port, and its partition's name. */
+  const needles = (server: HostileInstance) => [new URL(server.origin).host, b64(server), b64(server).toLowerCase()];
+  const stateOf = (profile: string) => JSON.parse(readFileSync(path.join(profile, 'shell-state.json'), 'utf8')) as { partitionsToRemove?: unknown; policyWipes?: string[] };
+
+  async function openAt(server: HostileInstance, profile: string, mode: HostileInstance['mode'], ...args: string[]): Promise<{ app: ElectronApplication; page: Page }> {
+    server.loot.length = 0;
+    server.mode = mode;
+    const app = await launch(profile, `--instance=${server.origin}/`, '--ignore-certificate-errors', '--bulwark-test-no-native', ...args);
+    const page = await shownPage(app);
+    await app.evaluate(({ app: electronApp, shell }) => {
+      electronApp.relaunch = () => undefined;
+      shell.openExternal = async () => undefined;
+    });
+    return { app, page };
+  }
+
+  /** A start that only shows the server's page, and a clean quit, so Chromium writes what it keeps. */
+  async function visit(server: HostileInstance, profile: string, ...args: string[]): Promise<void> {
+    const { app } = await openAt(server, profile, 'idle', ...args);
+    await app.close().catch(() => {});
+  }
+
+  /** The page wipes on load. With `wipe-finish` it finishes and the app ends for its restart; with `wipe` the app is killed right after the answer. */
+  async function wipeOn(server: HostileInstance, profile: string, mode: 'wipe' | 'wipe-finish'): Promise<void> {
+    // Opened looking only, so the restart is stubbed before the page asks; then the page that wipes.
+    const { app, page } = await openAt(server, profile, 'idle');
+    const running = app.process();
+    const gone = exits(app);
+    server.mode = mode;
+    await page.reload().catch(() => {});
+    try {
+      await expect.poll(() => server.loot.filter((entry) => entry.kind === 'wipe-done').length, { timeout: 30_000 }).toBe(1);
+      expect(server.loot.find((entry) => entry.kind === 'wipe-done')?.body).toEqual({ failed: [] });
+      if (mode === 'wipe') running.kill();
+      await Promise.race([gone, new Promise((resolve) => setTimeout(resolve, 60_000))]);
+      expect(running.exitCode !== null || running.killed, 'the app ended').toBe(true);
+    } finally {
+      await app.close().catch(() => {});
+    }
+  }
+
+  test("a page's wipe takes its partition's folder at the next start, network state and all; another profile keeps its own", async () => {
+    test.setTimeout(240_000);
+    const profile = tempProfile('wipe-folder');
+    const other = tempProfile('wipe-folder-other');
+    try {
+      await visit(first, profile);
+      await visit(first, other);
+      const before = tracesIn(profile, needles(first));
+      expect(before.some((hit) => hit.endsWith(path.join('Network', 'Network Persistent State'))), `the network state names the server before: ${before.join(', ')}`).toBe(true);
+
+      await wipeOn(first, profile, 'wipe-finish');
+      // The next start goes to another server.
+      await visit(second, profile);
+      expect(tracesIn(profile, needles(first)), 'nothing in the profile names the wiped server').toEqual([]);
+      expect(stateOf(profile).partitionsToRemove, 'and the note of it is gone').toBeUndefined();
+      expect(tracesIn(other, needles(first)).some((hit) => hit.includes('Network Persistent State')), "another profile's own data stays").toBe(true);
+    } finally {
+      removeProfile(profile);
+      removeProfile(other);
+    }
+  });
+
+  test('a crash between the wipe and the restart: the next start still takes the folder, all but the local storage the page keeps until it has told its server', async () => {
+    test.setTimeout(240_000);
+    const profile = tempProfile('wipe-crash');
+    try {
+      await visit(first, profile);
+      await wipeOn(first, profile, 'wipe');
+      expect(stateOf(profile).partitionsToRemove, 'noted before the restart').toEqual([{ partition: partitionName(first), keepLocalStorage: true }]);
+      await visit(second, profile);
+      expect(stateOf(profile).partitionsToRemove).toBeUndefined();
+      expect(readdirSync(partitionDir(profile, first)).filter((name) => name !== 'Local Storage'), 'only the local storage is left').toEqual([]);
+      expect(tracesIn(profile, needles(first)).filter((hit) => hit.includes('Network')), 'no network state').toEqual([]);
+    } finally {
+      removeProfile(profile);
+    }
+  });
+
+  test('a folder held by another program stays noted and the start goes on; the next start of the same server takes it first and begins fresh', async () => {
+    test.skip(process.platform !== 'win32', 'holds the file the Windows way');
+    test.setTimeout(240_000);
+    const profile = tempProfile('wipe-held');
+    try {
+      const seed = await openAt(first, profile, 'idle');
+      await seed.app.evaluate(async ({ BrowserWindow }, own) => {
+        const mine = BrowserWindow.getAllWindows().map((w) => w.webContents).find((c) => c.getURL().startsWith(own))!.session;
+        await mine.cookies.set({ url: own, name: 'own_server', value: 'x', expirationDate: Date.now() / 1000 + 86400, secure: true });
+        await mine.cookies.flushStore();
+      }, first.origin);
+      await seed.app.close().catch(() => {});
+      await wipeOn(first, profile, 'wipe-finish');
+
+      const held = path.join(partitionDir(profile, first), 'held.bin');
+      writeFileSync(held, 'held');
+      const holder = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$f = [IO.File]::Open('${held}', 'Open', 'Read', 'None'); Start-Sleep -Seconds 300`], { stdio: 'ignore', windowsHide: true });
+      const isHeld = () => {
+        try {
+          closeSync(openSync(held, 'r'));
+          return false;
+        } catch {
+          return true;
+        }
+      };
+      try {
+        await expect.poll(isHeld, { timeout: 30_000 }).toBe(true);
+        const { app } = await openAt(second, profile, 'idle');
+        expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length), 'the start went on').toBeGreaterThan(0);
+        await app.close().catch(() => {});
+        expect(stateOf(profile).partitionsToRemove, 'still noted').toEqual([{ partition: partitionName(first) }]);
+      } finally {
+        holder.kill();
+      }
+      await expect.poll(isHeld, { timeout: 30_000 }).toBe(false);
+
+      writeFileSync(path.join(partitionDir(profile, first), 'from-before'), 'x');
+      const back = await openAt(first, profile, 'idle');
+      try {
+        expect(existsSync(path.join(partitionDir(profile, first), 'from-before')), 'removed before the session opened it').toBe(false);
+        expect(existsSync(held)).toBe(false);
+        expect(stateOf(profile).partitionsToRemove).toBeUndefined();
+        const cookies = await back.app.evaluate(async ({ BrowserWindow }, own) => {
+          const mine = BrowserWindow.getAllWindows().map((w) => w.webContents).find((c) => c.getURL().startsWith(own))!.session;
+          return (await mine.cookies.get({ name: 'own_server' })).length;
+        }, first.origin);
+        expect(cookies).toBe(0);
+      } finally {
+        await back.app.close().catch(() => {});
+      }
+    } finally {
+      removeProfile(profile);
+    }
+  });
+
+  test('the policy wipe takes every partition folder, and nothing in the profile names the server after it', async () => {
+    test.skip(process.platform !== 'win32', 'the policy is read from the registry here');
+    test.setTimeout(240_000);
+    const root = `HKCU\\Software\\BulwarkTest\\Policies\\wipefolder${process.pid}`;
+    const policy = [`--bulwark-test-policy-root=${root}`, '--bulwark-test-policy-poll=250'];
+    const profile = tempProfile('wipe-policy');
+    try {
+      const seed = await openAt(first, profile, 'idle', ...policy);
+      await seed.app.evaluate(async ({ session }) => {
+        const other = session.fromPartition('persist:bulwark');
+        await other.cookies.set({ url: 'https://app.bulwark.localhost', name: 'other_server', value: 'x', expirationDate: Date.now() / 1000 + 86400, secure: true });
+        await other.cookies.flushStore();
+        const state = (globalThis as unknown as { __bulwarkOs: { hub: { ctx: { state: { data: { partitions?: string[] }; save: () => void } } } } }).__bulwarkOs.hub.ctx.state;
+        state.data.partitions = [...new Set([...(state.data.partitions ?? []), 'persist:bulwark'])];
+        state.save();
+      });
+      await seed.app.close().catch(() => {});
+      expect(tracesIn(profile, needles(first)).some((hit) => hit.includes('Network Persistent State'))).toBe(true);
+      expect(existsSync(path.join(profile, 'Partitions', 'bulwark'))).toBe(true);
+
+      spawnSync('reg.exe', ['add', `${root}\\Machine`, '/v', 'WipeOfflineData', '/t', 'REG_SZ', '/d', 'folders', '/f'], { windowsHide: true });
+      await visit(second, profile, ...policy);
+      expect(stateOf(profile).policyWipes).toEqual(['folders']);
+      await visit(second, profile, ...policy);
+      expect(tracesIn(profile, needles(first)), 'nothing in the profile names the server').toEqual([]);
+      expect(existsSync(path.join(profile, 'Partitions', 'bulwark')), 'the standalone partition went too').toBe(false);
+    } finally {
+      spawnSync('reg.exe', ['delete', root, '/f'], { windowsHide: true });
+      removeProfile(profile);
+    }
+  });
+});
+
+/** Every file under `profile` whose name or bytes hold one of `needles`, as UTF-8 or UTF-16: relative paths. */
+function tracesIn(profile: string, needles: string[]): string[] {
+  const hits: string[] = [];
+  const patterns = needles.flatMap((needle) => [Buffer.from(needle, 'utf8'), Buffer.from(needle, 'utf16le')]);
+  const names = needles.map((needle) => needle.toLowerCase());
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      const relative = path.relative(profile, full);
+      if (names.some((needle) => entry.name.toLowerCase().includes(needle))) hits.push(`${relative} (name)`);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile()) {
+        let bytes: Buffer;
+        try {
+          bytes = readFileSync(full);
+        } catch {
+          continue;
+        }
+        if (patterns.some((pattern) => bytes.includes(pattern))) hits.push(relative);
+      }
+    }
+  };
+  walk(profile);
+  return hits;
+}
 
 const site = (origin: string) => createHash('sha256').update(origin).digest('hex').slice(0, 16);
 const EDIT_ID = (origin: string) => (origin === APP_ORIGIN ? 'bbbbbbbbbbbbbbbb' : 'aaaaaaaaaaaaaaaa');

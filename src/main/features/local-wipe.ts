@@ -24,14 +24,22 @@
  * screen. A wipe at the start, before any window, goes on into that same start: there's
  * nothing to leave behind, and a step that failed mustn't restart the app for ever. It
  * runs again at the next start.
+ *
+ * What a wipe covers goes completely. The clear calls leave files in the partition's folder:
+ * Chromium's network state lists every server it talked to, and caches remain. A session's own
+ * files can't be deleted while it runs, so a wiped partition's folder goes at the next start,
+ * before any session opens it (`removeWipedPartitions`). The note of it is in the state file, so
+ * a crash before the restart doesn't lose it, and it goes once the folder has. A folder nothing
+ * has opened in this run, as at a policy's wipe at the start, goes at once.
  */
 
 import { readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { BrowserWindow, session as electronSession, type Session } from 'electron';
 import { APP_ORIGIN } from '../../server/protocol';
+import { APP_PARTITION, instancePartition } from '../app-session';
 import type { StateFile } from '../state';
-import { urlOfOrigin, wipeCovers, type WipeReason, type WipeScope } from '../wipe-scope';
+import { partitionFolder, settlePendingRemovals, urlOfOrigin, wipeCovers, type WipeReason, type WipeScope } from '../wipe-scope';
 
 export type { WipeReason, WipeScope } from '../wipe-scope';
 
@@ -88,10 +96,46 @@ export function unnotedPartitionFolders(userData: string, state: StateFile): str
   }
 }
 
+/** The partitions a session was opened for in this run: their files are held until the process ends. */
+const opened = new Set<string>();
+
 export function notePartition(state: StateFile, partition: string): void {
+  opened.add(partition);
   const known = state.data.partitions ?? [];
   if (known.includes(partition)) return;
   state.data.partitions = [...known, partition];
+  state.save();
+}
+
+function sessionOf(partition: string): Session {
+  opened.add(partition);
+  return electronSession.fromPartition(partition);
+}
+
+/** The partition a page of `origin` stands on (index.ts opens it). */
+function partitionOf(origin: string): string {
+  return origin === APP_ORIGIN ? APP_PARTITION : instancePartition(origin);
+}
+
+/** That partition's folder goes at the next start, all of it or all but the local storage. Written at once. */
+function removeAtNextStart(state: StateFile, partition: string, keepLocalStorage: boolean): void {
+  const others = (state.data.partitionsToRemove ?? []).filter((entry) => entry.partition !== partition);
+  state.data.partitionsToRemove = [...others, { partition, ...(keepLocalStorage ? { keepLocalStorage } : {}) }];
+  state.save();
+}
+
+/**
+ * At the start, before any session: the folders the last wipe left to go. What can't go yet (a
+ * file still held) stays noted for the next start, and the log says so; the start goes on. A
+ * partition whose whole folder went is no longer one this profile has.
+ */
+export function removeWipedPartitions(userData: string, state: StateFile): void {
+  const pending = state.data.partitionsToRemove;
+  if (pending === undefined) return;
+  const { left, gone } = settlePendingRemovals(userData, pending);
+  if (gone.length > 0) state.data.partitions = (state.data.partitions ?? []).filter((partition) => !gone.includes(partition));
+  if (left.length > 0) state.data.partitionsToRemove = left;
+  else delete state.data.partitionsToRemove;
   state.save();
 }
 
@@ -170,6 +214,8 @@ async function runSteps(scope: WipeScope): Promise<string[]> {
 /** How long a page gets after main's steps, to tell the instance. It may have gone by then. */
 const FINISH_WAIT_MS = 20_000;
 let finishWaiting: ReturnType<typeof setTimeout> | null = null;
+/** The partition and state of the page's wipe that waits for its finish. */
+let finishing: { partition: string; state: StateFile } | null = null;
 
 /**
  * What the page can't do, for its own server only: `origin` is the page's, `sender` its
@@ -193,6 +239,10 @@ export async function wipeForPage({ reason, account }: { reason: 'remote' | 'set
     wiping = false;
     return failed;
   }
+  // Until the page says otherwise, its local storage stays: a crash before the finish keeps what
+  // says whom to tell, as the finish without the page's word does.
+  finishing = { partition: partitionOf(origin), state };
+  removeAtNextStart(state, finishing.partition, true);
   // A page that goes before it gets to finish: the next start would stop here anyway.
   finishWaiting = setTimeout(() => void finishWipeForPage(sender, true), FINISH_WAIT_MS);
   return failed;
@@ -226,6 +276,8 @@ export async function finishWipeForPage(sender: Session, keepLocalStorage: boole
   if (!finishWaiting) return;
   clearTimeout(finishWaiting);
   finishWaiting = null;
+  if (finishing) removeAtNextStart(finishing.state, finishing.partition, keepLocalStorage);
+  finishing = null;
   await leaveWindows();
   try {
     await sender.clearStorageData(keepLocalStorage
@@ -252,6 +304,7 @@ export async function wipeForConnectionChange(session: Session, origin: string, 
     console.error('Clearing the storage failed:', error);
     failed.push('storage');
   }
+  removeAtNextStart(state, partitionOf(origin), false);
   return failed;
 }
 
@@ -277,9 +330,21 @@ export async function runLocalWipe(reason: WipeReason, userData: string, state: 
       failed.push(folder);
     }
   }
+  const removed: string[] = [];
   for (const partition of partitions) {
+    // Nothing has its files open yet in this run: the folder goes now, the network state with it.
+    const folder = partitionFolder(userData, partition);
+    if (folder && !opened.has(partition)) {
+      try {
+        rmSync(folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+        removed.push(partition);
+        continue;
+      } catch (error) {
+        console.warn(`Removing ${folder} failed, it is cleared now and goes at the next start:`, error);
+      }
+    }
     try {
-      const session = electronSession.fromPartition(partition);
+      const session = sessionOf(partition);
       await session.clearStorageData();
       await session.clearCache();
       await session.clearAuthCache();
@@ -287,7 +352,9 @@ export async function runLocalWipe(reason: WipeReason, userData: string, state: 
       console.error(`Wiping ${partition} failed:`, error);
       failed.push(partition);
     }
+    if (folder) removeAtNextStart(state, partition, false);
   }
+  if (removed.length > 0) state.data.partitions = (state.data.partitions ?? []).filter((partition) => !removed.includes(partition));
   failed.push(...(await runSteps({ reason, origin: null, account: null })));
   forgetShellRecords(state, null);
   if (hadWindows) restartSoon();
@@ -313,7 +380,7 @@ export async function clearStoreFiles(userData: string, state: StateFile, except
   }
   for (const partition of knownPartitions(state)) {
     try {
-      const session = electronSession.fromPartition(partition);
+      const session = sessionOf(partition);
       if (except.includes(session)) continue;
       await session.clearStorageData({ storages: ['filesystem'] });
     } catch (error) {

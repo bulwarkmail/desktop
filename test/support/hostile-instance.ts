@@ -3,11 +3,14 @@
 // answers /api/config the way a webmail does, so the app takes it as an instance. Everything
 // the page gets back is recorded in `loot`. No real server, no real data: the "recent files"
 // are made by the spec in a temp folder (--bulwark-test-recent-dir).
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createSecureServer, type Http2ServerRequest, type Http2ServerResponse } from 'node:http2';
 import { createServer, type Server } from 'node:https';
-import type { AddressInfo } from 'node:net';
+import type { AddressInfo, Socket } from 'node:net';
 import { generateCertificate } from '../../src/main/cert';
 
-export type HostileMode = 'idle' | 'recent-page' | 'recent-frame' | 'wipe' | 'prompt' | 'open-external';
+/** `wipe-finish`: the wipe, and then the finish a page gives once it has told its server. */
+export type HostileMode = 'idle' | 'recent-page' | 'recent-frame' | 'wipe' | 'wipe-finish' | 'prompt' | 'open-external';
 
 export interface HostileInstance {
   origin: string;
@@ -56,11 +59,14 @@ const PAYLOAD = `
     });
   }
 
-  if (mode === 'wipe' && !inFrame) {
+  if ((mode === 'wipe' || mode === 'wipe-finish') && !inFrame) {
     // No click, no question: on load.
     const controls = d.appLock.claim();
     if (!controls) { send('wipe-no-claim', null); return; }
-    controls.localWipe({ reason: 'settings', account: null }).then((result) => send('wipe-done', result), (error) => send('wipe-error', String(error)));
+    controls.localWipe({ reason: 'settings', account: null }).then(
+      (result) => send('wipe-done', result).finally(() => { if (mode === 'wipe-finish') controls.finishLocalWipe({ keepLocalStorage: false }); }),
+      (error) => send('wipe-error', String(error)),
+    );
   }
 
   if (mode === 'prompt' && !inFrame) {
@@ -85,10 +91,14 @@ const page = (mode: HostileMode, frame: boolean) => `<!doctype html><html data-m
 <body>${frame ? '<p>plugin frame</p>' : `<main style="padding:340px 24px 0"><h1>Inbox</h1><p>An ordinary-looking page. <a id="mail-link" href="mailto:someone@example.org">Write to someone</a></p></main>${mode === 'recent-frame' ? '<iframe src="/frame"></iframe>' : ''}`}
 <script src="/payload.js"></script></body></html>`;
 
-export async function startHostileInstance(port: number): Promise<HostileInstance> {
+/**
+ * `http2`: the server speaks HTTP/2 as a mail server does, so Chromium keeps it in the network
+ * state it writes to the profile (`Network Persistent State`). HTTP/1.1 stays on for anything else.
+ */
+export async function startHostileInstance(port: number, options: { http2?: boolean } = {}): Promise<HostileInstance> {
   const certificate = generateCertificate('localhost');
   const state: HostileInstance = { origin: '', mode: 'idle', loot: [], close: () => {} };
-  const server: Server = createServer({ key: certificate.keyPem, cert: certificate.certPem }, (req, res) => {
+  const handler = (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', 'https://localhost');
     if (url.pathname === '/api/config') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -126,12 +136,21 @@ export async function startHostileInstance(port: number): Promise<HostileInstanc
       return;
     }
     res.writeHead(404).end();
+  };
+  const tls = { key: certificate.keyPem, cert: certificate.certPem };
+  const sockets = new Set<Socket>();
+  const server: Server | ReturnType<typeof createSecureServer> = options.http2
+    ? createSecureServer({ ...tls, allowHTTP1: true }, handler as unknown as (req: Http2ServerRequest, res: Http2ServerResponse) => void)
+    : createServer(tls, handler);
+  server.on('connection', (socket: Socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
   });
   await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
   state.origin = `https://localhost:${(server.address() as AddressInfo).port}`;
   state.close = () => {
     server.close();
-    server.closeAllConnections();
+    for (const socket of sockets) socket.destroy();
   };
   return state;
 }

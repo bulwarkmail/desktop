@@ -34,7 +34,7 @@ import { privacy } from './features/privacy';
 import { clientAuth } from './features/client-certificates';
 import { createChannels, registerBridge } from './ipc';
 import { durableWrite, holdsAppLockRecords, KEY_CHECK_FOLDER, KEY_CHECK_SWITCH, KEY_INIT_SWITCH, keyInitArgs, keyOnDisk, keyOpens, KEYS_FOLDER, savedKey, saveKey, settleKeyBeforeChromium, waitForKeyOnDisk } from './key-on-disk';
-import { addWipeStep, notePartition, restartAfterWipe, wipeForConnectionChange } from './features/local-wipe';
+import { addWipeStep, notePartition, removeWipedPartitions, restartAfterWipe, wipeForConnectionChange } from './features/local-wipe';
 import { native } from './native';
 import { LocalAdmin } from './local-admin';
 import { requestGate } from './request-gate';
@@ -167,6 +167,8 @@ if (gotLock) {
 }
 
 const stateFile = new StateFile(path.join(app.getPath('userData'), 'shell-state.json'));
+// Before any session can open one of them: what the last wipe left of its partitions.
+if (gotLock) removeWipedPartitions(app.getPath('userData'), stateFile);
 policies.attachState(stateFile);
 if (gotLock) privacy.start(stateFile);
 if (gotLock) clientAuth.start(stateFile);
