@@ -4,17 +4,20 @@
  * after a click, so one click would let a same-origin plugin frame start twenty things, and
  * it's gone when someone takes longer than that over a native menu.
  *
- * A left mouse button or Enter or Space reaching a window, as Chromium's browser process
- * sees it, and a pick from a native menu, which main itself recorded. Taking it spends it.
- * The keys that choose in a closed list (arrows, Home, End, Page Up and Down) count too: a
- * drive letter picked with them changes the list without Enter (pass-3 files-p3-15). A key
- * held down counts once: its repeats are no new press.
+ * A left mouse button, a tap of a finger or Enter or Space reaching a window, as Chromium's
+ * browser process sees it, and a pick from a native menu, which main itself recorded. Taking
+ * it spends it. The keys that choose in a closed list (arrows, Home, End, Page Up and Down)
+ * count too: a drive letter picked with them changes the list without Enter (pass-3
+ * files-p3-15). A key held down counts once: its repeats are no new press. A tap is the
+ * finger's click, and counts once it is one: a finger that scrolls, or stays down for the
+ * menu a right click brings, taps nothing.
  *
  * Only that input and a native menu's pick are noted. A page's word, such as which line of
  * its own menu bar was picked, is never one. For that bar main keeps the last pick apart
- * (`takePick`): what it was (a click, Enter or Space, or a letter) and when. One pick runs one
- * line, and the menu decides whether it fits the line the page names. Where the left button
- * last went down is kept too (`takePress`), for a menu that opens only from the window's top row.
+ * (`takePick`): what it was (a click or tap, Enter or Space, or a letter) and when. One pick
+ * runs one line, and the menu decides whether it fits the line the page names. Where the left
+ * button last went down is kept too (`takePress`), for a menu that opens only from the
+ * window's top row. A tap reaches the browser process without a place, so it is no press.
  */
 
 import type { Input, WebContents } from 'electron';
@@ -24,7 +27,7 @@ const GESTURE_LIFE_MS = 5_000;
 /** From the click or key that picked a line of a menu the page draws to the page's report of it. */
 const PICK_LIFE_MS = 1_000;
 
-/** What picked a line in a menu the page draws: a left click let go, Enter or Space, or a plain letter or digit. */
+/** What picked a line in a menu the page draws: a left click let go or a tap, Enter or Space, or a plain letter or digit. */
 export interface MenuPick {
   at: number;
   kind: 'click' | 'key' | 'letter';
@@ -53,7 +56,8 @@ const watched = new WeakSet<WebContents>();
 /**
  * What `input-event` hands over. Electron types it as the bare InputEvent; a key's event carries
  * what `Input` describes (`key`, `code`, `isAutoRepeat`, `isComposing`, the modifiers), a mouse
- * event `button` and where it was, `x` and `y`.
+ * event `button` and where it was, `x` and `y`. A touch or a gesture made of touches carries
+ * its type and nothing else.
  */
 type SeenInput = Partial<Pick<Input, 'key' | 'code' | 'isAutoRepeat' | 'isComposing' | 'control' | 'alt' | 'meta'>> & {
   type: string;
@@ -117,12 +121,14 @@ export function watchUserGestures(contents: WebContents): void {
     const input = raw as unknown as SeenInput;
     const key = keyPressed(input);
     const clicked = input.type === 'mouseDown' && input.button === 'left';
+    // The gesture Chromium makes of a finger put down and lifted in place: what the page gets as a click.
+    const tapped = input.type === 'gestureTap';
     const pressed = key !== null && GESTURE_KEYS.has(key);
-    if (clicked || pressed) noteUserGesture(contents);
+    if (clicked || tapped || pressed) noteUserGesture(contents);
     const now = Date.now();
     if (clicked && typeof input.x === 'number' && typeof input.y === 'number' && Number.isFinite(input.x) && Number.isFinite(input.y)) presses.set(contents, { at: now, x: input.x, y: input.y });
     // A click picks a line when it's let go, where a page's click handler runs: one pick per click.
-    if (input.type === 'mouseUp' && input.button === 'left') picks.set(contents, { at: now, kind: 'click' });
+    if ((input.type === 'mouseUp' && input.button === 'left') || tapped) picks.set(contents, { at: now, kind: 'click' });
     else if (key !== null && PICK_KEYS.has(key)) picks.set(contents, { at: now, kind: 'key' });
     else if (key !== null) {
       const letter = plainLetter(input, key);

@@ -1,12 +1,13 @@
 import { EventEmitter } from 'node:events';
 import { expect, test } from '@playwright/test';
-import type { Input, MouseInputEvent, WebContents } from 'electron';
+import type { Input, InputEvent, MouseInputEvent, WebContents } from 'electron';
 import { takePick, takePress, takeUserGesture, watchUserGestures } from '../src/main/user-gesture';
 
 /**
  * What counts as the user doing something, as main sees the input reach a window. The events
  * are built the way Electron hands them to `input-event`: a key as `Input` (`key`, `code`,
- * `isAutoRepeat`, the modifiers; there is no `keyCode`), a click as a mouse input event.
+ * `isAutoRepeat`, the modifiers; there is no `keyCode`), a click as a mouse input event, a
+ * touch or a gesture made of touches as its type alone.
  */
 
 /** A key event as Electron sends it. `key` is the DOM's name for it, `code` the key's place. */
@@ -18,10 +19,15 @@ function mouseEvent(type: 'mouseDown' | 'mouseUp', button: 'left' | 'right' | 'm
   return { type, button, x, y, clickCount: 1, modifiers: button === 'left' ? ['leftbuttondown'] : [] };
 }
 
+/** A touch or gesture event as Electron sends it: no place, no button. */
+function touchEvent(type: InputEvent['type']): InputEvent {
+  return { type, modifiers: [] };
+}
+
 function contents() {
   const emitter = new EventEmitter();
   watchUserGestures(emitter as unknown as WebContents);
-  const input = (value: Input | MouseInputEvent) => emitter.emit('input-event', {}, value);
+  const input = (value: Input | MouseInputEvent | InputEvent) => emitter.emit('input-event', {}, value);
   return {
     input,
     take: () => takeUserGesture(emitter as unknown as WebContents),
@@ -71,6 +77,34 @@ test('where the left button went down is kept for a second, once, apart from the
   expect(page.press(), 'the place is where it went down, not where it was let go').toMatchObject({ x: 210, y: 14 });
   page.input(mouseEvent('mouseDown', 'left', 210, 14));
   expect(later(1_200, page.press), 'a second later is too late').toBeNull();
+});
+
+test('a tap of a finger counts as a left click does: a gesture, and a pick of one line', () => {
+  const page = contents();
+  // What reaches main for one tap, in this order.
+  for (const type of ['touchStart', 'gestureTapDown', 'touchEnd', 'gestureShowPress'] as const) page.input(touchEvent(type));
+  expect(page.pick(), 'the finger is down and up, the tap not made yet').toBeNull();
+  expect(page.take(), 'no gesture before the tap either').toBe(false);
+  page.input(touchEvent('gestureTap'));
+  expect(page.pick()).toMatchObject({ kind: 'click' });
+  expect(page.pick(), 'one tap picks one line').toBeNull();
+  expect(page.take(), 'the tap is a gesture for what the line runs').toBe(true);
+  expect(page.take(), 'once').toBe(false);
+  page.input(touchEvent('gestureTap'));
+  expect(later(1_200, page.pick), 'a second later is too late').toBeNull();
+  expect(page.press(), 'a tap has no place: it is no press').toBeNull();
+});
+
+test('a finger that scrolls, pinches, stays down or brings the menu of a right click taps nothing', () => {
+  const page = contents();
+  for (const type of [
+    'touchStart', 'touchMove', 'touchEnd', 'touchCancel', 'gestureTapDown', 'gestureShowPress', 'gestureTapCancel', 'gestureTapUnconfirmed',
+    'gestureScrollBegin', 'gestureScrollUpdate', 'gestureScrollEnd', 'gestureFlingStart', 'gesturePinchBegin', 'gesturePinchEnd',
+    'gestureShortPress', 'gestureLongPress', 'gestureLongTap', 'gestureTwoFingerTap', 'pointerDown', 'pointerUp',
+  ] as const) page.input(touchEvent(type));
+  expect(page.pick()).toBeNull();
+  expect(page.take()).toBe(false);
+  expect(page.press()).toBeNull();
 });
 
 test('a right or middle button, a button let go, and a key are no press', () => {

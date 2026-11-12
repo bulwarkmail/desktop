@@ -24,6 +24,7 @@ export type InputMode =
   | 'paste-bar-row'
   | 'paste-spellings'
   | 'paste-down'
+  | 'tap'
   | 'letter-pick';
 
 export interface InputInstance {
@@ -73,6 +74,23 @@ const PAYLOAD = `
         submit: () => { button.focus(); form.requestSubmit(); },
         focusBlur: () => { window.focus(); button.blur(); button.focus(); },
         touch: () => { try { button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', isPrimary: true })); button.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerType: 'touch', isPrimary: true })); } catch {} },
+        // A tap as a script can make one: touch events (bare ones where there is no touch screen
+        // to bring their constructors), the pointer events and click of a finger, and events
+        // named like the gesture.
+        tap: () => {
+          const touchEvent = (type) => {
+            try {
+              const point = new Touch({ identifier: 1, target: button, clientX: 10, clientY: 10 });
+              const down = type === 'touchstart' ? [point] : [];
+              return new TouchEvent(type, { bubbles: true, cancelable: true, touches: down, targetTouches: down, changedTouches: [point] });
+            } catch {
+              return new Event(type, { bubbles: true, cancelable: true });
+            }
+          };
+          for (const type of ['touchstart', 'touchend']) button.dispatchEvent(touchEvent(type));
+          for (const type of ['pointerdown', 'pointerup', 'click']) button.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerType: 'touch', isPrimary: true, button: 0, clientX: 10, clientY: 10 }));
+          for (const type of ['gesturetap', 'gestureTap', 'tap']) button.dispatchEvent(new Event(type, { bubbles: true }));
+        },
       };
       const out = {};
       for (const [name, attempt] of Object.entries(tries)) {
@@ -332,6 +350,45 @@ const PAYLOAD = `
         send('key-ran', event.key);
       });
       send('ready', { letter: zoomIn && zoomIn.mnemonic !== undefined ? zoomIn.label[zoomIn.mnemonic].toLowerCase() : null });
+    })();
+  }
+
+  if (mode === 'tap') {
+    // A page used with a finger: a line of the drawn menu that runs Zoom in when it's clicked,
+    // and a phone link. And a part of the page that runs the line and hands a phone link to
+    // the shell whenever a finger is lifted from it, tap or not.
+    (async () => {
+      await sleep(400);
+      const zoomIn = (await menuLines()).find((line) => line.id === 'view.zoomIn');
+      const line = document.createElement('div');
+      line.id = 'tap-line';
+      line.textContent = 'Zoom in';
+      line.style.cssText = 'position:fixed;left:40px;top:120px;width:240px;height:40px;background:#ddd;z-index:10';
+      document.body.appendChild(line);
+      const link = document.createElement('a');
+      link.id = 'tap-link';
+      link.href = 'tel:+4930777';
+      link.textContent = 'call';
+      link.style.cssText = 'position:fixed;left:40px;top:220px;width:240px;height:40px;background:#dde;z-index:10';
+      document.body.appendChild(link);
+      line.addEventListener('click', async (event) => {
+        if (zoomIn) run(zoomIn);
+        await sleep(300);
+        send('tapped', { pointerType: event.pointerType ?? null });
+      });
+      const pad = document.createElement('div');
+      pad.id = 'pad';
+      pad.style.cssText = 'position:fixed;left:400px;top:300px;width:300px;height:300px;background:#eee;z-index:10';
+      document.body.appendChild(pad);
+      const lifted = async (event) => {
+        if (zoomIn) run(zoomIn);
+        d.shell.openExternal('tel:+4930778');
+        await sleep(300);
+        send('lifted', event.type);
+      };
+      pad.addEventListener('touchend', lifted);
+      pad.addEventListener('touchcancel', lifted);
+      send('ready', { line: [160, 140], link: [160, 240], pad: [550, 450] });
     })();
   }
 

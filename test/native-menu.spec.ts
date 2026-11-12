@@ -2001,12 +2001,58 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
       const before = await zoomLevel(app);
       await expect.poll(() => lootOf('synthetic-done').length, { timeout: 90_000 }).toBe(1);
       const out = lootOf('synthetic-done')[0] as Record<string, unknown>;
-      for (const name of ['mouse', 'elementClick', 'keyEnter', 'keySpace', 'accessKey', 'submit', 'focusBlur', 'touch']) {
+      for (const name of ['mouse', 'elementClick', 'keyEnter', 'keySpace', 'accessKey', 'submit', 'focusBlur', 'touch', 'tap']) {
         expect.soft(out[name], name).toEqual({ list: { ok: false, reason: 'gesture' }, active: false });
       }
       expect.soft(await zoomLevel(app), 'zoomed by a menu line').toBe(before);
       expect.soft(await opened(app), 'handed to other programs').toEqual([]);
       expect.soft(await prompts(app), 'questions asked').toEqual([]);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('with a finger: a tap on a line of the menu runs it and a tap on a phone link opens it; a swipe is no tap', async () => {
+    const profile = tempProfile('menu-tap');
+    const { app, page } = await openInstance(profile, 'tap');
+    try {
+      await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
+      const ready = lootOf('ready')[0] as { line: [number, number]; link: [number, number]; pad: [number, number] };
+      const before = await zoomLevel(app);
+      // The finger goes in as the OS sends it, through the browser's input path.
+      const cdp = await page.context().newCDPSession(page);
+      const down = ([x, y]: [number, number]) => cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+      const up = () => cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      const tap = async (at: [number, number]) => {
+        await down(at);
+        await page.waitForTimeout(60);
+        await up();
+      };
+      await tap(ready.line);
+      await expect.poll(() => lootOf('tapped').length, { timeout: 10_000 }).toBe(1);
+      expect(lootOf('tapped')[0], 'the page saw a finger\'s click').toEqual({ pointerType: 'touch' });
+      await expect.poll(() => zoomLevel(app), { timeout: 5_000 }).toBeGreaterThan(before);
+      const afterLine = await zoomLevel(app);
+      await page.waitForTimeout(1_300);
+      await tap(ready.link);
+      await expect.poll(() => opened(app), { timeout: 5_000 }).toContain('tel:+4930777');
+
+      // Past the five seconds the tap's gesture lasts. Then a finger that moves: the page runs
+      // the line and hands over a phone link when it is lifted.
+      await page.waitForTimeout(5_200);
+      const [x, y] = ready.pad;
+      await down([x, y]);
+      for (const step of [30, 60, 90, 120]) {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y - step }] });
+        await page.waitForTimeout(30);
+      }
+      await up();
+      await expect.poll(() => lootOf('lifted').length, { timeout: 10_000 }).toBe(1);
+      await cdp.detach();
+      await page.waitForTimeout(700);
+      expect(await zoomLevel(app), 'zoom after a swipe').toBe(afterLine);
+      expect(await opened(app), 'a phone link handed over after a swipe').not.toContain('tel:+4930778');
     } finally {
       await app.close().catch(() => {});
       removeProfile(profile);
