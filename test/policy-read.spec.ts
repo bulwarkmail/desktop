@@ -496,6 +496,15 @@ test.describe('what the app opens with', () => {
     expect(decideStart(snapshot({}, { InstanceUrl: INSTANCE }), null, { askConnection: true })).toMatchObject({ kind: 'welcome', instanceUrl: INSTANCE, urlLocked: false });
   });
 
+  test(`"Use my organisation's Bulwark instead" opens the choice on the web address step (desktop#5)`, () => {
+    expect(decideStart(snapshot(), null, { askConnection: true, askPage: 'org' })).toMatchObject({ kind: 'welcome', allowStandalone: true, page: 'org' });
+    const both = snapshot({ InstanceUrl: INSTANCE, AllowStandalone: 1 });
+    expect(decideStart(both, null, { askConnection: true, askPage: 'org' })).toMatchObject({ kind: 'welcome', urlLocked: true, page: 'org' });
+    // File > Change connection… asks as before, and a first run starts at the top.
+    expect(decideStart(snapshot(), null, { askConnection: true })).not.toHaveProperty('page');
+    expect(decideStart(snapshot(), null, { askPage: 'org' })).not.toHaveProperty('page');
+  });
+
   each([
     ['http://mail.example.com', 'insecure'],
     ['file:///c:/evil', 'scheme'],

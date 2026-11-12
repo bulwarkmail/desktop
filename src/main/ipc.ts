@@ -146,7 +146,9 @@ export function registerBridge(ctx: FeatureContext, options: IpcOptions): void {
     if (window && state && typeof state === 'object') ctx.menu.setCommandState(window, state as never);
   });
   // The page asked first (its own question window). False where a policy forces the connection.
-  ctx.handle(CHANNEL.menuChangeConnection, () => ctx.menu.changeConnection());
+  // 'org': its "Use my organisation's Bulwark instead", which opens on the web address step.
+  // Older pages send nothing, and anything else counts as nothing.
+  ctx.handle(CHANNEL.menuChangeConnection, (_event, _window, page) => ctx.menu.changeConnection(page === 'org' ? 'org' : undefined));
 
   ctx.on(CHANNEL.shellOpenExternal, (_event, _window, url) => {
     if (typeof url === 'string') openExternally(url);

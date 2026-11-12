@@ -98,6 +98,8 @@ export interface ShellState {
   devTools?: boolean;
   /** "Change Connection" was chosen: ask once, also over a recommended server. */
   askConnection?: boolean;
+  /** And on which step: "Use my organisation's Bulwark instead" asks for the web address. */
+  askConnectionPage?: 'org';
   /** WipeOfflineData values already acted on, so each deletes once, across restarts. */
   policyWipes?: string[];
   /** Every partition this profile has used: a wipe covers them all. */

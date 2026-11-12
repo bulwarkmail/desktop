@@ -22,13 +22,14 @@ import { CHANNEL, type MenuBarEntry, type MenuBarEvent, type MenuBarMenu, type M
 import { assignMnemonics, barItemsOf, enabledWhileLocked, findBarItem, tidySeparators, windowMenuNames, type BarSourceItem } from './menu-text';
 import { strings } from './strings';
 import { noteUserGesture } from './user-gesture';
+import type { WelcomePage } from './policy-start';
 import type { WindowManager } from './windows';
 
 export interface MenuHooks {
   /** Left out while a policy forces the connection. Asks first (natively), then restarts. */
   switchMode?: () => void;
   /** The same without the question: the page asked already. */
-  switchModeNow?: () => void;
+  switchModeNow?: (page?: WelcomePage) => void;
   devTools: boolean;
   newWindow: () => void;
   zoom: (step: 1 | -1 | 0) => void;
@@ -123,7 +124,7 @@ export class MenuController {
   constructor(private readonly hooks: MenuHooks) {}
 
   /** What the start decided, once it has: nothing is offered before that. */
-  allowSwitchingMode(switchMode: (() => void) | undefined, switchModeNow?: () => void): void {
+  allowSwitchingMode(switchMode: (() => void) | undefined, switchModeNow?: (page?: WelcomePage) => void): void {
     this.hooks.switchMode = switchMode;
     this.hooks.switchModeNow = switchMode ? switchModeNow : undefined;
     this.rebuild();
@@ -135,11 +136,14 @@ export class MenuController {
     this.scheduleRebuild();
   }
 
-  /** The page asked and the answer was Change. False where switching isn't allowed. */
-  changeConnection(): boolean {
+  /**
+   * The page asked and the answer was Change. False where switching isn't allowed. `page`:
+   * the welcome step to open on, 'org' for "Use my organisation's Bulwark instead".
+   */
+  changeConnection(page?: WelcomePage): boolean {
     const now = this.hooks.switchModeNow;
     if (!now) return false;
-    now();
+    now(page);
     return true;
   }
 

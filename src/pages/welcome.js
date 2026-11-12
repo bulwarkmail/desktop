@@ -28,7 +28,7 @@ const fill = { 'privacy-title': 'privacyTitle', 'privacy-intro': 'privacyIntro',
 for (const [id, key] of Object.entries(fill)) byId(id).textContent = text[key];
 // The window's title stays "Bulwark" on every step: the headings name the steps.
 
-const { allowStandalone, instanceUrl, urlLocked, askTelemetry, askCrashReports, dark } = window.bulwarkWelcome.options;
+const { allowStandalone, instanceUrl, urlLocked, page, askTelemetry, askCrashReports, dark } = window.bulwarkWelcome.options;
 
 // Light or dark as the app was last, else as the system is, following it while open.
 const systemDark = window.matchMedia('(prefers-color-scheme: dark)');
@@ -149,7 +149,8 @@ if (allowStandalone) {
     byId('status').textContent = '';
     show('connection');
   });
-  show(instanceUrl ? 'org' : 'connection');
+  // 'org': "Use my organisation's Bulwark instead" brought the user here.
+  show(instanceUrl || page === 'org' ? 'org' : 'connection');
 } else {
   byId('connection').remove();
   byId('org-back').remove();

@@ -42,7 +42,7 @@ import { MenuController } from './menu';
 import { attachWindowGuards, type GuardOptions } from './navigation';
 import { applyPermissionPolicy } from './permissions';
 import { sandboxRefused } from './sandbox-check';
-import { connectionMustChange, decideStart, restartKey, type StartDecision } from './policy-start';
+import { connectionMustChange, decideStart, restartKey, type StartDecision, type WelcomePage } from './policy-start';
 import { policyProblems } from '../shared/policy-schema';
 import { deniedEnvironment, deniedSwitches, withoutDeniedSwitches } from './switch-guard';
 import { pluginFeatures, profilePaths, seedProfile, serverEnv } from './profile';
@@ -618,7 +618,7 @@ function showWelcome(theme: ThemeController, decision: Extract<StartDecision, { 
       devTools,
       // Encoded: quotes don't survive Chromium's command line on Windows.
       // dark: as the app was last; null follows the system (nothing from the app yet).
-      additionalArguments: [`--bulwark-welcome=${encodeURIComponent(JSON.stringify({ allowStandalone: decision.allowStandalone, instanceUrl: decision.instanceUrl, urlLocked: decision.urlLocked, askTelemetry: questions.telemetry, askCrashReports: questions.crashReports, dark: stateFile.data.theme ? colours.dark : null }))}`],
+      additionalArguments: [`--bulwark-welcome=${encodeURIComponent(JSON.stringify({ allowStandalone: decision.allowStandalone, instanceUrl: decision.instanceUrl, urlLocked: decision.urlLocked, page: decision.page ?? null, askTelemetry: questions.telemetry, askCrashReports: questions.crashReports, dark: stateFile.data.theme ? colours.dark : null }))}`],
     },
   });
   // Shown once it has its height, so it doesn't jump. A page that never says shows anyway.
@@ -691,6 +691,7 @@ function showWelcome(theme: ThemeController, decision: Extract<StartDecision, { 
       stateFile.data.mode = mode;
       if (instanceUrl) stateFile.data.instanceUrl = instanceUrl;
       stateFile.data.askConnection = undefined;
+      stateFile.data.askConnectionPage = undefined;
       stateFile.save();
       ipcMain.removeHandler(CHANNEL.welcomeChoose);
       ipcMain.removeHandler(CHANNEL.welcomePrivacy);
@@ -716,6 +717,7 @@ function startDecision(): StartDecision {
     mode: stateFile.data.mode,
     instanceUrl: stateFile.data.instanceUrl,
     askConnection: stateFile.data.askConnection,
+    askPage: stateFile.data.askConnectionPage,
     devInstance: __BULWARK_TEST_BUILD__ && DEV ? argValue('instance') : null,
     devStandalone: __BULWARK_TEST_BUILD__ && DEV && process.argv.includes('--standalone'),
   });
@@ -833,9 +835,12 @@ function showMain(options: { hidden?: boolean } = {}): void {
 // Quitting closes the windows, and each may ask first. Nothing is forgotten until all
 // of them have gone, so choosing Stay keeps the mode.
 let switching = false;
+/** The welcome step the restart opens on, when the page asked for one. */
+let switchPage: WelcomePage | undefined;
 
-function switchMode(): void {
+function switchMode(page?: WelcomePage): void {
   switching = true;
+  switchPage = page;
   app.quit();
 }
 
@@ -854,6 +859,7 @@ function finishSwitch(): void {
   stateFile.data.mode = undefined;
   stateFile.data.instanceUrl = undefined;
   stateFile.data.askConnection = true;
+  stateFile.data.askConnectionPage = switchPage;
   stateFile.save();
   app.relaunch();
 }
