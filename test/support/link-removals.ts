@@ -4,7 +4,7 @@
 import path from 'node:path';
 import { removeOwn, removeTree } from '../../src/main/remove-tree';
 import { removeFilesDrive } from '../../src/main/uninstall-cleanup';
-import { settlePendingRemovals } from '../../src/main/wipe-scope';
+import { removeAsideFolders, settlePendingRemovals } from '../../src/main/wipe-scope';
 
 async function outcome(run: () => unknown): Promise<string> {
   try {
@@ -25,13 +25,15 @@ export async function runRemovals(work: string): Promise<Record<string, string>>
     ownAtLink: await outcome(() => removeOwn(at('own-at-link'))),
     treeThroughLink: await outcome(() => removeTree(at('via', 'inside'), { root: at() })),
     partitions: await outcome(() => {
-      const { left } = settlePendingRemovals(at('profile'), [
+      const { left, aside } = settlePendingRemovals(at('profile'), [
         { partition: 'persist:instance-inner' },
         { partition: 'persist:instance-innerk', keepLocalStorage: true },
         { partition: 'persist:instance-top' },
         { partition: 'persist:instance-topk', keepLocalStorage: true },
       ]);
       if (left.length > 0) throw Object.assign(new Error('left'), { code: `left ${left.length}` });
+      const stays = removeAsideFolders(at('profile'), aside);
+      if (stays.length > 0) throw Object.assign(new Error('aside'), { code: `aside left ${stays.length}` });
     }),
     drive: await outcome(() => removeFilesDrive(helper as never, {
       profile: at('profile'),

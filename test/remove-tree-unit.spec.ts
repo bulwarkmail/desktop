@@ -90,8 +90,8 @@ function check(planted: Planted, outcome: Record<string, string>, runtime: strin
   expect(lstatSync(path.join(app, 'tree-at-link')).isSymbolicLink(), `${runtime}: a refused link stays a link`).toBe(true);
   expect(existsSync(path.join(app, 'own-at-link')), `${runtime}: removeOwn takes the link itself`).toBe(false);
   expect(existsSync(path.join(planted.work, 'outside', 'via', 'inside', 'x.txt')), `${runtime}: nothing through a link below the root`).toBe(true);
-  expect(readdirSync(path.join(app, 'profile', 'Partitions')).sort(), `${runtime}: the partitions' folders`).toEqual(['instance-innerk']);
-  expect(readdirSync(path.join(app, 'profile', 'Partitions', 'instance-innerk')), `${runtime}: only the kept local storage would stay, and there was none`).toEqual([]);
+  // Moved aside and then removed; the kept one had no local storage to bring back.
+  expect(readdirSync(path.join(app, 'profile', 'Partitions')), `${runtime}: the partitions' folders`).toEqual([]);
   expect(existsSync(path.join(app, 'Bulwark Files', 'me@example.org')), `${runtime}: the drive's folder goes`).toBe(false);
 }
 

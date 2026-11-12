@@ -103,8 +103,10 @@ export interface ShellState {
   policyWipes?: string[];
   /** Every partition this profile has used: the policy's wipe covers them all, a server's wipe its own. */
   partitions?: string[];
-  /** Wiped partitions whose folder goes at the next start, before any session has it (wipe-scope.ts). */
+  /** Wiped partitions whose folder goes aside at the next start, before any session has it (wipe-scope.ts). */
   partitionsToRemove?: PendingRemoval[];
+  /** Wiped partitions' folders moved aside under `Partitions`, removed once their files are free. */
+  partitionsAside?: string[];
   /** A hash of the key DPAPI stopped opening, once the user was told their sign-ins went with it. */
   keyLossTold?: string;
   /** Instances the user said may use the OS keystore. Revocable in the webmail's settings. */

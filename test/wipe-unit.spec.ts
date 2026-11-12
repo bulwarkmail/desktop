@@ -1,10 +1,11 @@
 // Whose things a wipe takes, and what goes of a wiped partition's folder, in plain Node:
 // src/main/wipe-scope.ts.
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
-import { partitionFolder, partitionLeftovers, removePartitionFolder, settlePendingRemovals, urlOfOrigin, wipeCovers } from '../src/main/wipe-scope';
+import { isAsideName, partitionFolder, removeAsideFolders, settlePendingRemovals, urlOfOrigin, wipeCovers } from '../src/main/wipe-scope';
 
 const STANDALONE = 'https://app.bulwark.localhost';
 const SERVER = 'https://mail.example.org';
@@ -40,52 +41,106 @@ test('a partition names its folder under Partitions, lowercased as Electron does
   }
 });
 
-test("what goes of a wiped partition's folder: everything, or all but the local storage the page keeps", () => {
-  const entries = ['Cache', 'Code Cache', 'DIPS', 'Local Storage', 'Network', 'Session Storage', 'Shared Dictionary', 'WebStorage'];
-  expect(partitionLeftovers(entries, false)).toEqual(entries);
-  expect(partitionLeftovers(entries, true)).toEqual(['Cache', 'Code Cache', 'DIPS', 'Network', 'Session Storage', 'Shared Dictionary', 'WebStorage']);
-});
+/** A partition folder with network state and local storage, as Chromium leaves one. */
+function partitionAt(profile: string, name: string): string {
+  const folder = path.join(profile, 'Partitions', name);
+  mkdirSync(path.join(folder, 'Network'), { recursive: true });
+  writeFileSync(path.join(folder, 'Network', 'Network Persistent State'), '{"servers":["https://mail.example.org"]}');
+  mkdirSync(path.join(folder, 'Local Storage', 'leveldb'), { recursive: true });
+  writeFileSync(path.join(folder, 'Local Storage', 'leveldb', '000003.log'), 'kept');
+  return folder;
+}
 
-test('the removals left for this start: done ones go from the note, a folder that stays is tried again, a bad entry touches nothing', () => {
-  const profile = mkdtempSync(path.join(tmpdir(), 'bw-wipe-folders-'));
+test('the folders a wipe left go aside under a name no session opens; the kept local storage comes back into a fresh folder; a bad entry touches nothing', () => {
+  const profile = mkdtempSync(path.join(tmpdir(), 'bw-wipe-aside-'));
   try {
-    const make = (name: string) => {
-      const folder = path.join(profile, 'Partitions', name);
-      mkdirSync(path.join(folder, 'Network'), { recursive: true });
-      writeFileSync(path.join(folder, 'Network', 'Network Persistent State'), '{"servers":["https://mail.example.org"]}');
-      mkdirSync(path.join(folder, 'Local Storage', 'leveldb'), { recursive: true });
-      writeFileSync(path.join(folder, 'Local Storage', 'leveldb', '000003.log'), 'kept');
-      return folder;
-    };
-    const whole = make('instance-whole');
-    const keep = make('instance-keep');
-    const stuck = make('instance-stuck');
-    const outside = path.join(profile, 'keys');
-    mkdirSync(outside);
+    const whole = partitionAt(profile, 'instance-whole');
+    const keep = partitionAt(profile, 'instance-keep');
+    mkdirSync(path.join(profile, 'keys'));
     const pending = [
       { partition: 'persist:instance-WHOLE' },
       { partition: 'persist:instance-keep', keepLocalStorage: true },
-      { partition: 'persist:instance-stuck' },
+      { partition: 'persist:instance-none' },
       { partition: 'persist:../keys' },
       { nothing: true },
       'persist:instance-whole',
     ];
-    const tried: string[] = [];
-    const { left, gone } = settlePendingRemovals(profile, pending, (folder, keepLocalStorage) => {
-      tried.push(path.basename(folder));
-      return folder === stuck ? false : removePartitionFolder(folder, keepLocalStorage);
-    });
-    expect(tried).toEqual(['instance-whole', 'instance-keep', 'instance-stuck']);
-    expect(gone).toEqual(['persist:instance-WHOLE']);
-    expect(left).toEqual([{ partition: 'persist:instance-stuck' }]);
+    const { left, gone, aside } = settlePendingRemovals(profile, pending);
+    expect(left).toEqual([]);
+    expect(gone).toEqual(['persist:instance-WHOLE', 'persist:instance-none']);
+    expect(aside).toHaveLength(2);
+    for (const name of aside) expect(isAsideName(name), name).toBe(true);
+    // A fresh start for both: the whole folder is gone, the kept one holds only its local storage.
     expect(existsSync(whole)).toBe(false);
     expect(readdirSync(keep)).toEqual(['Local Storage']);
-    expect(existsSync(path.join(stuck, 'Network'))).toBe(true);
-    expect(existsSync(outside)).toBe(true);
-    // Already gone: nothing to do, and done.
-    expect(removePartitionFolder(whole, false)).toBe(true);
-    expect(removePartitionFolder(whole, true)).toBe(true);
-    expect(settlePendingRemovals(profile, undefined)).toEqual({ left: [], gone: [] });
+    expect(readdirSync(path.join(keep, 'Local Storage', 'leveldb'))).toEqual(['000003.log']);
+    const asideFolders = aside.map((name) => path.join(profile, 'Partitions', name));
+    expect(asideFolders.map((folder) => readdirSync(folder).sort())).toEqual([['Local Storage', 'Network'], ['Network']]);
+    expect(existsSync(path.join(profile, 'keys'))).toBe(true);
+    expect(settlePendingRemovals(profile, undefined)).toEqual({ left: [], gone: [], aside: [] });
+    // Then the moved folders go.
+    expect(removeAsideFolders(profile, aside)).toEqual([]);
+    expect(readdirSync(path.join(profile, 'Partitions')).sort()).toEqual(['instance-keep']);
+  } finally {
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('a folder that can not go aside stays where it is and stays noted, untouched', () => {
+  const profile = mkdtempSync(path.join(tmpdir(), 'bw-wipe-held-'));
+  try {
+    const folder = partitionAt(profile, 'instance-held');
+    let tries = 0;
+    const refuse = () => {
+      tries += 1;
+      throw Object.assign(new Error('in use'), { code: 'EBUSY' });
+    };
+    const { left, gone, aside } = settlePendingRemovals(profile, [{ partition: 'persist:instance-held', keepLocalStorage: true }], { waitMs: 600, rename: refuse });
+    expect({ left, gone, aside }).toEqual({ left: [{ partition: 'persist:instance-held', keepLocalStorage: true }], gone: [], aside: [] });
+    expect(tries, 'tried again while it waited').toBeGreaterThan(1);
+    expect(readdirSync(folder).sort()).toEqual(['Local Storage', 'Network']);
+  } finally {
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('Windows refuses to move a folder aside while another program holds a file in it', () => {
+  test.skip(process.platform !== 'win32', 'holds the file the Windows way');
+  const profile = mkdtempSync(path.join(tmpdir(), 'bw-wipe-hold-'));
+  const held = path.join(partitionAt(profile, 'instance-held'), 'held.bin');
+  writeFileSync(held, 'held');
+  try {
+    // The file open with no sharing, and the folder's move tried while it is.
+    const script = path.join(profile, 'try.ps1');
+    writeFileSync(script, `$f = [IO.File]::Open('${held}', 'Open', 'Read', 'None')
+try { [IO.Directory]::Move('${path.dirname(held)}', '${path.join(profile, 'Partitions', 'wiped~0000000000000000')}'); 'moved' } catch { 'refused' } finally { $f.Close() }`);
+    const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File', script], { encoding: 'utf8', windowsHide: true });
+    expect(run.stdout.trim()).toBe('refused');
+  } finally {
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('folders moved aside are removed a few per start; one still held, or past the limit, waits for the next; nothing else is touched', () => {
+  const profile = mkdtempSync(path.join(tmpdir(), 'bw-wipe-removal-'));
+  try {
+    const root = path.join(profile, 'Partitions');
+    const names = Array.from({ length: 7 }, (_, at) => `wiped~${String(at).padStart(16, '0')}`);
+    for (const name of names) partitionAt(profile, name);
+    partitionAt(profile, 'instance-live');
+    // A crash between the move and its note: an aside folder no note names is found on disk.
+    const noted = [...names.slice(0, 6), 'wiped~ffffffffffffffff', '../keys', 'instance-live', 42];
+    const removed: string[] = [];
+    const left = removeAsideFolders(profile, noted, 5, (folder) => {
+      if (path.basename(folder) === names[1]) throw new Error('held');
+      removed.push(path.basename(folder));
+      rmSync(folder, { recursive: true, force: true });
+    });
+    expect(removed).toEqual([names[0], names[2], names[3], names[4]]);
+    expect(left).toEqual([names[1], names[5], names[6]]);
+    expect(readdirSync(root).sort()).toEqual(['instance-live', names[1], names[5], names[6]].sort());
+    expect(removeAsideFolders(profile, left)).toEqual([]);
+    expect(readdirSync(root)).toEqual(['instance-live']);
   } finally {
     rmSync(profile, { recursive: true, force: true });
   }

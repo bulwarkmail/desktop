@@ -35,7 +35,7 @@ import { clientAuth } from './features/client-certificates';
 import { uninstallDrivePlaces } from './features/files-drive';
 import { createChannels, registerBridge } from './ipc';
 import { durableWrite, holdsAppLockRecords, KEY_CHECK_FOLDER, KEY_CHECK_SWITCH, KEY_INIT_SWITCH, keyInitArgs, keyOnDisk, keyOpens, KEYS_FOLDER, savedKey, saveKey, settleKeyBeforeChromium, waitForKeyOnDisk } from './key-on-disk';
-import { addWipeStep, notePartition, removeWipedPartitions, restartAfterWipe, wipeForConnectionChange } from './features/local-wipe';
+import { addWipeStep, notePartition, readyToOpen, removeWipedPartitions, restartAfterWipe, wipeForConnectionChange } from './features/local-wipe';
 import { native } from './native';
 import { LocalAdmin } from './local-admin';
 import { requestGate } from './request-gate';
@@ -405,7 +405,40 @@ async function keySafeOnDisk(instance: boolean): Promise<boolean> {
  */
 let serverAwaitingInit: ServerProcess | null = null;
 
+/** The question below is up, and is the only window: closing it is no quit by itself. */
+let waitingForFolder = false;
+
+/**
+ * A wiped partition's folder still in place: no session opens it until it has gone aside, as
+ * what that session kept would go with it later. The user sees why and can try again or quit.
+ */
+async function folderReady(partition: string, host: string | null): Promise<boolean> {
+  waitingForFolder = true;
+  let ready: boolean;
+  try {
+    ready = await readyToOpen(app.getPath('userData'), stateFile, partition, async () => {
+      const text = strings();
+      const { response } = await showMessageBox({
+        type: 'warning',
+        title: 'Bulwark',
+        message: host ? text.wipedFolderHeldTitle(host) : text.wipedFolderHeldTitleApp,
+        detail: text.wipedFolderHeldDetail,
+        buttons: [text.wipedFolderHeldRetry, text.wipedFolderHeldQuit],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      });
+      return response === 0;
+    });
+  } finally {
+    waitingForFolder = false;
+  }
+  if (!ready) app.quit();
+  return ready;
+}
+
 async function bootStandalone(theme: ThemeController): Promise<void> {
+  if (!(await folderReady(APP_PARTITION, null))) return;
   try {
     await bootStandaloneServer(theme);
   } finally {
@@ -587,6 +620,7 @@ async function bootStandaloneServer(theme: ThemeController): Promise<void> {
 async function bootInstance(instanceUrl: string, theme: ThemeController): Promise<void> {
   const origin = new URL(instanceUrl).origin;
   const partition = instancePartition(origin);
+  if (!(await folderReady(partition, new URL(origin).host))) return;
   const session = electronSession.fromPartition(partition);
   keepSignInsOnDisk(session);
   notePartition(stateFile, partition);
@@ -976,6 +1010,9 @@ if (gotLock) {
   if (electronRegistersScheme(process.platform, osRegistrationAllowed())) app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME);
 
   app.on('window-all-closed', () => {
+    // The question about a wiped folder still in use is the only window while it's up: its
+    // answer decides whether the start goes on or quits.
+    if (waitingForFolder) return;
     // Closing to the tray hides the main window, so this means there's nothing left.
     if (process.platform !== 'darwin') app.quit();
   });

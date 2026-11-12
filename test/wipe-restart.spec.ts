@@ -571,6 +571,101 @@ test.describe('what a wipe covers goes completely', () => {
     }
   });
 
+  test('the same server, while its wiped folder is held: nothing opens it, the user is told and tries again; what the fresh session keeps stays at later starts', async () => {
+    test.skip(process.platform !== 'win32', 'holds the file the Windows way');
+    test.setTimeout(300_000);
+    const profile = tempProfile('wipe-same');
+    const isHeldBy = (file: string) => () => {
+      try {
+        closeSync(openSync(file, 'r'));
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    const hold = (file: string) => spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$f = [IO.File]::Open('${file}', 'Open', 'Read', 'None'); Start-Sleep -Seconds 300`], { stdio: 'ignore', windowsHide: true });
+    try {
+      await visit(first, profile);
+      await wipeOn(first, profile, 'wipe-finish');
+      const held = path.join(partitionDir(profile, first), 'held.bin');
+      writeFileSync(held, 'held');
+      const holder = hold(held);
+      let app: ElectronApplication | null = null;
+      try {
+        await expect.poll(isHeldBy(held), { timeout: 30_000 }).toBe(true);
+        first.loot.length = 0;
+        first.mode = 'idle';
+        app = await launch(profile, `--instance=${first.origin}/`, '--ignore-certificate-errors', '--bulwark-test-no-native');
+        await app.evaluate(({ app: electronApp }) => {
+          electronApp.relaunch = () => undefined;
+        });
+        // The app's own question, and no page of the server behind it.
+        let dialog: Page | undefined;
+        await expect.poll(() => {
+          dialog = app!.windows().find((window) => !window.isClosed() && window.url().startsWith('data:'));
+          return Boolean(dialog);
+        }, { timeout: 90_000 }).toBe(true);
+        await dialog!.waitForFunction(() => document.querySelector('#title')?.textContent);
+        expect(await dialog!.locator('#title').textContent()).toContain(new URL(first.origin).host);
+        expect(await app.evaluate(({ BrowserWindow }, own) => BrowserWindow.getAllWindows().filter((w) => w.webContents.getURL().startsWith(own)).length, first.origin), 'no page of the server').toBe(0);
+        expect(first.loot, 'the server was not asked for its page').toEqual([]);
+        expect(existsSync(path.join(partitionDir(profile, first), 'Network')), 'the old folder untouched').toBe(true);
+
+        holder.kill();
+        await expect.poll(isHeldBy(held), { timeout: 30_000 }).toBe(false);
+        await dialog!.waitForTimeout(1_000);
+        await dialog!.getByRole('button', { name: 'Try again' }).click();
+        await expect.poll(() => app!.evaluate(({ BrowserWindow }, own) => BrowserWindow.getAllWindows().filter((w) => w.webContents.getURL().startsWith(own)).length, first.origin), { timeout: 90_000, message: 'the server opens after the try' }).toBe(1);
+        expect(existsSync(held), 'the old folder went aside').toBe(false);
+        await app.evaluate(async ({ BrowserWindow }, own) => {
+          const mine = BrowserWindow.getAllWindows().map((w) => w.webContents).find((c) => c.getURL().startsWith(own))!.session;
+          await mine.cookies.set({ url: own, name: 'signed_in_after_the_wipe', value: 'x', expirationDate: Date.now() / 1000 + 86400, secure: true });
+          await mine.cookies.flushStore();
+        }, first.origin);
+      } finally {
+        holder.kill();
+        await app?.close().catch(() => {});
+      }
+
+      // Two more starts of the same server: the sign-in made after the wipe stays.
+      for (let start = 0; start < 2; start += 1) {
+        const later = await openAt(first, profile, 'idle');
+        try {
+          const kept = await later.app.evaluate(async ({ BrowserWindow }, own) => {
+            const mine = BrowserWindow.getAllWindows().map((w) => w.webContents).find((c) => c.getURL().startsWith(own))!.session;
+            return (await mine.cookies.get({ name: 'signed_in_after_the_wipe' })).length;
+          }, first.origin);
+          expect(kept, `the sign-in made after the wipe, start ${start + 1}`).toBe(1);
+        } finally {
+          await later.app.close().catch(() => {});
+        }
+      }
+      expect(stateOf(profile).partitionsToRemove).toBeUndefined();
+      expect(readdirSync(path.join(profile, 'Partitions')).filter((name) => name.startsWith('wiped~')), 'what went aside is removed').toEqual([]);
+
+      // A folder set aside that stays held never stops a start, and goes once it's free.
+      const aside = path.join(profile, 'Partitions', 'wiped~0123456789abcdef');
+      mkdirSync(aside, { recursive: true });
+      const asideHeld = path.join(aside, 'held.bin');
+      writeFileSync(asideHeld, 'held');
+      const asideHolder = hold(asideHeld);
+      try {
+        await expect.poll(isHeldBy(asideHeld), { timeout: 30_000 }).toBe(true);
+        const meanwhile = await openAt(first, profile, 'idle');
+        expect(await meanwhile.app.evaluate(({ BrowserWindow }, own) => BrowserWindow.getAllWindows().filter((w) => w.webContents.getURL().startsWith(own)).length, first.origin), 'the start went on').toBe(1);
+        await meanwhile.app.close().catch(() => {});
+        expect(existsSync(asideHeld), 'still there while held').toBe(true);
+      } finally {
+        asideHolder.kill();
+      }
+      await expect.poll(isHeldBy(asideHeld), { timeout: 30_000 }).toBe(false);
+      await visit(first, profile);
+      expect(existsSync(aside), 'gone at the start after it was let go').toBe(false);
+    } finally {
+      removeProfile(profile);
+    }
+  });
+
   test('the policy wipe takes every partition folder, and nothing in the profile names the server after it', async () => {
     test.skip(process.platform !== 'win32', 'the policy is read from the registry here');
     test.setTimeout(240_000);

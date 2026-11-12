@@ -28,9 +28,12 @@
  * What a wipe covers goes completely. The clear calls leave files in the partition's folder:
  * Chromium's network state lists every server it talked to, and caches remain. A session's own
  * files can't be deleted while it runs, so a wiped partition's folder goes at the next start,
- * before any session opens it (`removeWipedPartitions`). The note of it is in the state file, so
- * a crash before the restart doesn't lose it, and it goes once the folder has. A folder nothing
- * has opened in this run, as at a policy's wipe at the start, goes at once.
+ * before any session opens it (`removeWipedPartitions`): first it is moved aside under a name no
+ * session opens, so the server's next session gets a fresh folder, then the moved folder is
+ * removed whenever its files are free. A folder that can't be moved aside is opened by nobody
+ * until it can (`readyToOpen`): a session in it would lose what it keeps once the folder goes.
+ * The notes are in the state file, so a crash before the restart doesn't lose them. A folder
+ * nothing has opened in this run, as at a policy's wipe at the start, goes aside at once.
  */
 
 import { readdirSync } from 'node:fs';
@@ -40,7 +43,7 @@ import { APP_ORIGIN } from '../../server/protocol';
 import { APP_PARTITION, instancePartition } from '../app-session';
 import { isLinkPath, removeOwn } from '../remove-tree';
 import type { StateFile } from '../state';
-import { partitionFolder, settlePendingRemovals, urlOfOrigin, wipeCovers, type WipeReason, type WipeScope } from '../wipe-scope';
+import { partitionFolder, removeAsideFolders, settlePendingRemovals, urlOfOrigin, wipeCovers, type PendingRemoval, type WipeReason, type WipeScope } from '../wipe-scope';
 
 export type { WipeReason, WipeScope } from '../wipe-scope';
 
@@ -109,6 +112,7 @@ export function notePartition(state: StateFile, partition: string): void {
 }
 
 function sessionOf(partition: string): Session {
+  if (held.has(partition)) throw new Error(`${partition} is still being set aside`);
   opened.add(partition);
   return electronSession.fromPartition(partition);
 }
@@ -125,19 +129,70 @@ function removeAtNextStart(state: StateFile, partition: string, keepLocalStorage
   state.save();
 }
 
-/**
- * At the start, before any session: the folders the last wipe left to go. What can't go yet (a
- * file still held) stays noted for the next start, and the log says so; the start goes on. A
- * partition whose whole folder went is no longer one this profile has.
- */
-export function removeWipedPartitions(userData: string, state: StateFile): void {
-  const pending = state.data.partitionsToRemove;
-  if (pending === undefined) return;
-  const { left, gone } = settlePendingRemovals(userData, pending);
-  if (gone.length > 0) state.data.partitions = (state.data.partitions ?? []).filter((partition) => !gone.includes(partition));
+/** How long the start waits for a wiped folder still held by the run before it, which may be ending. */
+const START_WAIT_MS = 3_000;
+/** The same before a session of that very partition opens, after which the user is asked. */
+const OPEN_WAIT_MS = 2_000;
+/** Folders moved aside that one start tries to remove: a folder that stays held costs little. */
+const ASIDE_PER_START = 5;
+
+/** Partitions whose wiped folder couldn't be moved aside: no session may open them in this run. */
+const held = new Set<string>();
+
+/** Notes what a settle did: the folders still to move, those moved aside, and the partitions gone. */
+function noteSettled(state: StateFile, settled: { left: PendingRemoval[]; gone: string[]; aside: string[] }, settledPartitions: readonly string[]): void {
+  const others = (state.data.partitionsToRemove ?? []).filter((entry) => !settledPartitions.includes(entry.partition));
+  const left = [...others, ...settled.left];
   if (left.length > 0) state.data.partitionsToRemove = left;
   else delete state.data.partitionsToRemove;
+  if (settled.gone.length > 0) state.data.partitions = (state.data.partitions ?? []).filter((partition) => !settled.gone.includes(partition));
+  if (settled.aside.length > 0) state.data.partitionsAside = [...new Set([...(state.data.partitionsAside ?? []), ...settled.aside])];
+  // Before any removal: a crash still knows where the folders went.
   state.save();
+}
+
+/** Removes some of the folders moved aside, quietly; what stays held is tried at the next start. */
+function removeAside(userData: string, state: StateFile): void {
+  const before = state.data.partitionsAside ?? [];
+  const left = removeAsideFolders(userData, before, ASIDE_PER_START);
+  if (left.length > 0) state.data.partitionsAside = left;
+  else delete state.data.partitionsAside;
+  if (left.length !== before.length || left.some((name, at) => name !== before[at])) state.save();
+}
+
+/**
+ * At the start, before any session: each folder the last wipe left goes aside, then what was set
+ * aside is removed as far as it can be. A folder still held stays noted, and no session opens it
+ * in this run (`readyToOpen`); the start itself goes on.
+ */
+export function removeWipedPartitions(userData: string, state: StateFile): void {
+  const pending = state.data.partitionsToRemove ?? [];
+  if (pending.length > 0) {
+    const settled = settlePendingRemovals(userData, pending, { waitMs: START_WAIT_MS });
+    for (const entry of settled.left) held.add(entry.partition);
+    noteSettled(state, settled, pending.map((entry) => entry.partition));
+  }
+  removeAside(userData, state);
+}
+
+/**
+ * Before a session opens `partition`: if its wiped folder is still in place, it's tried again,
+ * then `ask` says whether to try once more. A session never opens a wiped folder: what it kept
+ * would go with the folder once it can be set aside. False: the user would rather quit.
+ */
+export async function readyToOpen(userData: string, state: StateFile, partition: string, ask: () => Promise<boolean>): Promise<boolean> {
+  while (held.has(partition)) {
+    const mine = (state.data.partitionsToRemove ?? []).filter((entry) => entry.partition === partition);
+    const settled = settlePendingRemovals(userData, mine, { waitMs: OPEN_WAIT_MS });
+    noteSettled(state, settled, [partition]);
+    if (settled.left.length === 0) {
+      held.delete(partition);
+      removeAside(userData, state);
+      return true;
+    }
+    if (!(await ask())) return false;
+  }
+  return true;
 }
 
 async function leaveWindows(): Promise<boolean> {
@@ -331,18 +386,15 @@ export async function runLocalWipe(reason: WipeReason, userData: string, state: 
       failed.push(folder);
     }
   }
-  const removed: string[] = [];
   for (const partition of partitions) {
-    // Nothing has its files open yet in this run: the folder goes now, the network state with it.
+    // Nothing has its files open yet in this run: the folder goes aside now, the network state
+    // with it. Held: nothing opens it in this run, and the next start sets it aside.
     const folder = partitionFolder(userData, partition);
     if (folder && !opened.has(partition)) {
-      try {
-        removeOwn(folder);
-        removed.push(partition);
-        continue;
-      } catch (error) {
-        console.warn(`Removing ${folder} failed, it is cleared now and goes at the next start:`, error);
-      }
+      const settled = settlePendingRemovals(userData, [{ partition }]);
+      noteSettled(state, settled, [partition]);
+      for (const entry of settled.left) held.add(entry.partition);
+      continue;
     }
     try {
       const session = sessionOf(partition);
@@ -355,7 +407,7 @@ export async function runLocalWipe(reason: WipeReason, userData: string, state: 
     }
     if (folder) removeAtNextStart(state, partition, false);
   }
-  if (removed.length > 0) state.data.partitions = (state.data.partitions ?? []).filter((partition) => !removed.includes(partition));
+  removeAside(userData, state);
   failed.push(...(await runSteps({ reason, origin: null, account: null })));
   forgetShellRecords(state, null);
   if (hadWindows) restartSoon();
@@ -380,6 +432,8 @@ export async function clearStoreFiles(userData: string, state: StateFile, except
     }
   }
   for (const partition of knownPartitions(state)) {
+    // Its store goes with the folder once that can be set aside; opening it now would keep it.
+    if (held.has(partition)) continue;
     try {
       const session = sessionOf(partition);
       if (except.includes(session)) continue;
