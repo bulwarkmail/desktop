@@ -255,9 +255,9 @@ let wipedEarly = false;
 
 // Whatever the mode, and before the feature's setup: a wipe at the start comes first. A server's
 // wipe takes the accounts turned on from its page (DriveController.wipe).
-addWipeStep(async ({ origin }) => {
+addWipeStep(async ({ origin, legacy }) => {
   if (!controller && origin === null) wipedEarly = true;
-  await driveController()?.wipe(origin);
+  await driveController()?.wipe(origin, legacy);
 });
 
 /** For the folders feature: where the drive keeps its folders, which no folder pair may touch. */

@@ -114,6 +114,19 @@ test.describe('the minidump cap', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test('on a profile that only ran one server, the crash files from before any run was noted go with that server\'s wipe', () => {
+    const dir = folder();
+    const instance = 'https://mail.example.org';
+    plant(dir, 'before-notes', 10, 9);
+    noteCrashRun(dir, instance, Date.now() - 8 * 86_400_000);
+    plant(dir, 'instance-1', 10, 7);
+    removeCrashFilesOf(dir, 'https://other.example', instance);
+    expect(ids(dir)).toEqual(['instance-1', 'before-notes']);
+    removeCrashFilesOf(dir, instance, instance);
+    expect(ids(dir)).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   test('a folder that isn\'t there is no crash files', () => {
     expect(listCrashFiles(path.join(tmpdir(), 'bw-no-such-folder'))).toEqual([]);
     expect(sweepCrashFiles(path.join(tmpdir(), 'bw-no-such-folder'))).toBe(0);

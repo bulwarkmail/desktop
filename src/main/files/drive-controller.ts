@@ -821,10 +821,11 @@ export class DriveController {
    * The wipe. Null: every sync root of this profile's, their folders, the letter and every wish.
    * A server's: the accounts turned on from its page, with their sync roots, folders and the
    * engine's records, and its yes; another page's stay. An account stored before accounts named
-   * their page is this run's page's if its yes names it, and the standalone page's otherwise.
+   * their page is this run's page's if its yes names it, and `legacy`'s otherwise: the one
+   * server the profile ran, or the standalone page's (wipe-scope.ts `legacyOwner`).
    */
-  wipe(origin: string | null = null): Promise<void> {
-    if (origin !== null) return this.wipeServer(origin);
+  wipe(origin: string | null = null, legacy?: string): Promise<void> {
+    if (origin !== null) return this.wipeServer(origin, legacy);
     return this.serial(async () => {
       for (const account of [...this.live.keys()]) await this.stop(account, true);
       for (const entry of Object.values(this.deps.store.read().accounts ?? {})) this.removeFolder(path.win32.join(this.base(), entry.folder));
@@ -840,12 +841,12 @@ export class DriveController {
     });
   }
 
-  private wipeServer(origin: string): Promise<void> {
+  private wipeServer(origin: string, legacy: string | undefined): Promise<void> {
     return this.serial(async () => {
       const { consent } = this.deps;
       const thisRun = consent?.origin === origin;
       const owns = (account: string, entry: StoredDriveAccount) =>
-        entry.origin ? entry.origin === origin : (thisRun && consent!.has(account)) || wipeCovers(origin, undefined);
+        entry.origin ? entry.origin === origin : (thisRun && consent!.has(account)) || wipeCovers(origin, undefined, legacy);
       // What's live was turned on by this run's page.
       if (thisRun) for (const account of [...this.live.keys()]) await this.stop(account, true);
       const theirs = Object.entries(this.deps.store.read().accounts ?? {}).filter(([account, entry]) => owns(account, entry));

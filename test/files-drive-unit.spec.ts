@@ -1205,4 +1205,35 @@ test.describe('turning the drive on: a click, and then the user\'s yes', () => {
       remove();
     }
   });
+
+  test('on a profile that only ran one server, an account from before accounts named their page is that server\'s at its wipe, with no yes too', async () => {
+    const SERVER = 'https://mail.example.org';
+    const older = (label: string) => ({ label, folder: label, rootId: `r-${label}`, createdAt: 1 });
+    const stored: StoredDrive = {
+      accounts: {
+        'stray-acct': older('stray@example.org'),
+        'other-acct': { ...older('other@example.org'), origin: 'https://other.example' },
+      },
+    };
+    const { drive, base, registered, store, remove } = askingDrive([true], { stored });
+    try {
+      registered.push(`Bulwark Test Unit!S-1-5-21-1!${accountKey(PROFILE, 'stray-acct')}`);
+      registered.push(`Bulwark Test Unit!S-1-5-21-1!${rootKey(PROFILE, 'other-acct')}`);
+      mkdirSync(path.join(base, 'stray@example.org'));
+      writeFileSync(path.join(base, 'stray@example.org', 'contract.txt'), 'a file of the server, kept on this device');
+      mkdirSync(path.join(base, 'other@example.org'));
+      const folders = () => readdirSync(realpathSync.native(base)).sort();
+
+      // A third page's wipe takes neither, whoever the older records belong to.
+      await drive.wipe('https://third.example', SERVER);
+      expect(Object.keys(store.value.accounts ?? {}).sort()).toEqual(['other-acct', 'stray-acct']);
+
+      await drive.wipe(SERVER, SERVER);
+      expect(Object.keys(store.value.accounts ?? {})).toEqual(['other-acct']);
+      expect(registered.map(keyOfRoot)).toEqual([rootKey(PROFILE, 'other-acct')]);
+      expect(folders()).toEqual(['other@example.org']);
+    } finally {
+      remove();
+    }
+  });
 });

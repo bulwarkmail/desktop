@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
-import { isAsideName, partitionFolder, removeAsideFolders, settlePendingRemovals, urlOfOrigin, wipeCovers } from '../src/main/wipe-scope';
+import { isAsideName, legacyOwner, originOfPartition, partitionFolder, removeAsideFolders, settlePendingRemovals, urlOfOrigin, wipeCovers } from '../src/main/wipe-scope';
 
 const STANDALONE = 'https://app.bulwark.localhost';
 const SERVER = 'https://mail.example.org';
@@ -21,6 +21,32 @@ test("a server's wipe takes its own records only; a record with no origin is the
   expect(wipeCovers(SERVER, 'http://mail.example.org')).toBe(false);
   // The policy's wipe takes everyone's.
   for (const owner of [SERVER, STANDALONE, undefined]) expect(wipeCovers(null, owner)).toBe(true);
+});
+
+test('a record with no origin is the one server the profile ran, when that is certain, and the standalone page\'s otherwise', () => {
+  const part = (origin: string) => `persist:instance-${Buffer.from(origin).toString('base64url')}`;
+  expect(originOfPartition('persist:bulwark')).toBe(STANDALONE);
+  expect(originOfPartition(part(SERVER))).toBe(SERVER);
+  expect(originOfPartition(part('https://mail.example.org/inbox'))).toBeNull();
+  expect(originOfPartition(part('not a url'))).toBeNull();
+  expect(originOfPartition('persist:something-else')).toBeNull();
+
+  // Only this server's partition noted, no folder nobody noted, nothing wiped before.
+  expect(legacyOwner([part(SERVER)], false, false)).toEqual({ owner: SERVER, unsure: false });
+  // Only the standalone page, or nothing yet.
+  expect(legacyOwner(['persist:bulwark'], false, false)).toEqual({ owner: STANDALONE, unsure: false });
+  expect(legacyOwner([], false, false)).toEqual({ owner: STANDALONE, unsure: false });
+  // Anything that leaves doubt: the standalone page's, and the doubt is kept.
+  expect(legacyOwner([part(SERVER), 'persist:bulwark'], false, false)).toEqual({ owner: STANDALONE, unsure: true });
+  expect(legacyOwner([part(SERVER), part('https://other.example.net')], false, false)).toEqual({ owner: STANDALONE, unsure: true });
+  expect(legacyOwner([part(SERVER)], true, false)).toEqual({ owner: STANDALONE, unsure: true });
+  expect(legacyOwner([part(SERVER), 'persist:something-else'], false, false)).toEqual({ owner: STANDALONE, unsure: true });
+  expect(legacyOwner([part(SERVER)], false, true)).toEqual({ owner: STANDALONE, unsure: true });
+
+  expect(wipeCovers(SERVER, undefined, SERVER)).toBe(true);
+  expect(wipeCovers(STANDALONE, undefined, SERVER)).toBe(false);
+  expect(wipeCovers(SERVER, STANDALONE, SERVER)).toBe(false);
+  expect(wipeCovers('https://other.example.net', undefined, SERVER)).toBe(false);
 });
 
 test("a window to bring back is a server's when its page is on that origin", () => {

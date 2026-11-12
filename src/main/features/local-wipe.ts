@@ -38,12 +38,12 @@
 
 import { readdirSync } from 'node:fs';
 import path from 'node:path';
-import { BrowserWindow, session as electronSession, type Session } from 'electron';
+import { app, BrowserWindow, session as electronSession, type Session } from 'electron';
 import { APP_ORIGIN } from '../../server/protocol';
 import { APP_PARTITION, instancePartition } from '../app-session';
 import { isLinkPath, removeOwn } from '../remove-tree';
 import type { StateFile } from '../state';
-import { partitionFolder, removeAsideFolders, settlePendingRemovals, urlOfOrigin, wipeCovers, type PendingRemoval, type WipeReason, type WipeScope } from '../wipe-scope';
+import { isAsideName, legacyOwner, partitionFolder, removeAsideFolders, settlePendingRemovals, urlOfOrigin, wipeCovers, type PendingRemoval, type WipeReason, type WipeScope } from '../wipe-scope';
 
 export type { WipeReason, WipeScope } from '../wipe-scope';
 
@@ -111,6 +111,20 @@ export function notePartition(state: StateFile, partition: string): void {
   state.save();
 }
 
+/**
+ * Whose records that name no page are, for this profile (wipe-scope.ts `legacyOwner`). Once it
+ * can't be told for certain, that is kept.
+ */
+function legacyOf(state: StateFile): string {
+  const unnamed = unnotedPartitionFolders(app.getPath('userData'), state).some((folder) => !isAsideName(path.basename(folder)));
+  const { owner, unsure } = legacyOwner(knownPartitions(state), unnamed, state.data.legacyUnsure === true);
+  if (unsure && state.data.legacyUnsure !== true) {
+    state.data.legacyUnsure = true;
+    state.save();
+  }
+  return owner;
+}
+
 function sessionOf(partition: string): Session {
   if (held.has(partition)) throw new Error(`${partition} is still being set aside`);
   opened.add(partition);
@@ -145,7 +159,12 @@ function noteSettled(state: StateFile, settled: { left: PendingRemoval[]; gone: 
   const left = [...others, ...settled.left];
   if (left.length > 0) state.data.partitionsToRemove = left;
   else delete state.data.partitionsToRemove;
-  if (settled.gone.length > 0) state.data.partitions = (state.data.partitions ?? []).filter((partition) => !settled.gone.includes(partition));
+  if (settled.gone.length > 0) {
+    state.data.partitions = (state.data.partitions ?? []).filter((partition) => !settled.gone.includes(partition));
+    // A server whose partition went may come back, or another may come: what an older version
+    // left that names no page can't be told to be the next one's.
+    state.data.legacyUnsure = true;
+  }
   if (settled.aside.length > 0) state.data.partitionsAside = [...new Set([...(state.data.partitionsAside ?? []), ...settled.aside])];
   // Before any removal: a crash still knows where the folders went.
   state.save();
@@ -282,7 +301,8 @@ export async function wipeForPage({ reason, account }: { reason: 'remote' | 'set
   if (account !== null) {
     try {
       await sender.clearCache();
-      for (const step of accountSteps) await step({ reason, origin, account });
+      const legacy = legacyOf(state);
+      for (const step of accountSteps) await step({ reason, origin, account, legacy });
     } catch (error) {
       console.error('Wiping an account failed:', error);
       failed.push('account');
@@ -318,7 +338,7 @@ async function wipeServer(reason: WipeReason, session: Session, origin: string, 
     console.error('Clearing the cache failed:', error);
     failed.push('cache');
   }
-  failed.push(...(await runSteps({ reason, origin, account: null })));
+  failed.push(...(await runSteps({ reason, origin, account: null, legacy: legacyOf(state) })));
   forgetShellRecords(state, origin);
   return failed;
 }
@@ -408,7 +428,7 @@ export async function runLocalWipe(reason: WipeReason, userData: string, state: 
     if (folder) removeAtNextStart(state, partition, false);
   }
   removeAside(userData, state);
-  failed.push(...(await runSteps({ reason, origin: null, account: null })));
+  failed.push(...(await runSteps({ reason, origin: null, account: null, legacy: APP_ORIGIN })));
   forgetShellRecords(state, null);
   if (hadWindows) restartSoon();
   else wiping = false;

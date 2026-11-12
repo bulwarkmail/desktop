@@ -112,7 +112,7 @@ export class PrivacyManager extends EventEmitter<PrivacyEvents> {
     // the partition steps and of any feature: a server's wipe the files of its runs, the
     // policy's all of them. The ID is the shell's own, whoever asks.
     policies.on('wipe-offline-data', () => this.wiped(null));
-    addWipeStep(async ({ origin }) => this.wiped(origin));
+    addWipeStep(async ({ origin, legacy }) => this.wiped(origin, legacy));
     if (this.crashReportsOn) this.startCrashReporter();
     else removeAllCrashFiles(this.crashDir);
     sweepCrashFiles(this.crashDir);
@@ -319,8 +319,8 @@ export class PrivacyManager extends EventEmitter<PrivacyEvents> {
     rmSync(path.join(profilePaths(app.getPath('userData')).telemetry, '.telemetry-id'), { force: true });
   }
 
-  private wiped(origin: string | null): void {
-    removeCrashFilesOf(this.crashDir, origin);
+  private wiped(origin: string | null, legacy?: string): void {
+    removeCrashFilesOf(this.crashDir, origin, legacy);
     this.dropId();
   }
 

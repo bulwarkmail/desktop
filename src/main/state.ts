@@ -107,6 +107,12 @@ export interface ShellState {
   partitionsToRemove?: PendingRemoval[];
   /** Wiped partitions' folders moved aside under `Partitions`, removed once their files are free. */
   partitionsAside?: string[];
+  /**
+   * Whose a record is that names no page can't be told for certain: this profile ran more than
+   * one server, or a wiped one (wipe-scope.ts `legacyOwner`). Such a record is then the
+   * standalone page's. Kept once true.
+   */
+  legacyUnsure?: boolean;
   /** A hash of the key DPAPI stopped opening, once the user was told their sign-ins went with it. */
   keyLossTold?: string;
   /** Instances the user said may use the OS keystore. Revocable in the webmail's settings. */

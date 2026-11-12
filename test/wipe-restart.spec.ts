@@ -285,9 +285,10 @@ test.describe("a server's page wipes its own server", () => {
       const all = await page.evaluate(() => (window as unknown as { __controls: { localWipe(request: unknown): Promise<unknown> } }).__controls.localWipe({ reason: 'settings', account: null }));
       expect(all).toEqual({ failed: ['a test step broke'] });
       const scopes = await app.evaluate(() => (globalThis as unknown as { __scopes: unknown[] }).__scopes);
+      // Someone who used this server and the standalone page: an older record naming no page is the standalone page's.
       expect(scopes).toEqual([
-        { reason: 'remote', origin: instance.origin, account: 'a@example.test' },
-        { reason: 'settings', origin: instance.origin, account: null },
+        { reason: 'remote', origin: instance.origin, account: 'a@example.test', legacy: APP_ORIGIN },
+        { reason: 'settings', origin: instance.origin, account: null, legacy: APP_ORIGIN },
       ]);
       // The steps after the broken one ran, and so did the records.
       expect(records(profile, instance.origin)).toMatchObject({ importJob: false, editCopy: false, syncedFolder: false, recentYes: false });
@@ -300,6 +301,48 @@ test.describe("a server's page wipes its own server", () => {
       await app.close().catch(() => {});
       removeProfile(profile);
     }
+  });
+
+  test('on a profile that only ever ran this server, its wipe also takes what an older version left naming no page', async () => {
+    test.setTimeout(180_000);
+    const profile = tempProfile('wipe-only-server');
+    const first = await openInstance(profile, 'idle');
+    await first.app.close().catch(() => {});
+    const file = path.join(profile, 'shell-state.json');
+    const state = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    expect(state.partitions, 'the only partition this profile has opened').toEqual([`persist:instance-${Buffer.from(instance.origin).toString('base64url')}`]);
+    // As versions before records named their page left them: a drive account with no page and
+    // no yes, and a certificate choice with no page.
+    Object.assign(state, {
+      certificateChoices: { 'mail.example:443': { fingerprint: 'bb' } },
+      filesDrive: { accounts: { 'old-acct': { label: 'old@example.org', folder: 'old@example.org', rootId: 'r-old', createdAt: 1 } } },
+    });
+    writeFileSync(file, JSON.stringify(state, null, 2));
+    const driveFolder = path.join(profile, 'Bulwark Files', 'old@example.org');
+    mkdirSync(driveFolder, { recursive: true });
+    writeFileSync(path.join(driveFolder, 'contract.txt'), 'a file of the server, kept on this device');
+
+    const { app, page } = await openInstance(profile, 'idle');
+    const running = app.process();
+    const gone = exits(app);
+    try {
+      await fakeOsIntegration(app, 1);
+      const answer = await page.evaluate(() => {
+        const held = window as unknown as { __controls: { localWipe(request: unknown): Promise<unknown> }; bulwarkDesktop: { appLock: { claim(): never } } };
+        held.__controls = held.bulwarkDesktop.appLock.claim();
+        return held.__controls.localWipe({ reason: 'remote', account: null });
+      });
+      expect(answer).toEqual({ failed: [] });
+      await page.evaluate(() => (window as unknown as { __controls: { finishLocalWipe(options: unknown): Promise<void> } }).__controls.finishLocalWipe({ keepLocalStorage: false })).catch(() => undefined);
+      await Promise.race([gone, new Promise((resolve) => setTimeout(resolve, 60_000))]);
+      expect(running.exitCode, 'the app ended by itself for its restart').not.toBeNull();
+    } finally {
+      await app.close().catch(() => {});
+    }
+    const after = JSON.parse(readFileSync(file, 'utf8')) as { filesDrive?: { accounts?: Record<string, unknown> }; certificateChoices?: Record<string, unknown> };
+    expect({ drive: Object.keys(after.filesDrive?.accounts ?? {}), certificates: Object.keys(after.certificateChoices ?? {}) }).toEqual({ drive: [], certificates: [] });
+    expect(existsSync(driveFolder), "the drive's folder with the server's files").toBe(false);
+    removeProfile(profile);
   });
 
   test('changing the connection offers to remove the server being left: Keep keeps it, Remove takes it and nothing else', async () => {
@@ -748,8 +791,8 @@ const ALL_GONE: Records = { appLock: false, editCopy: false, importJob: false, r
 /**
  * The shell's records of two servers, written into a profile that isn't running: an instance's,
  * stamped with its origin, and the standalone page's, the way older versions left them (no origin
- * where the record had none then). `running` is the one the next start opens: it gets no gate
- * record, which would lock that start.
+ * where the record had none then). Both partitions are noted, as for someone who used both.
+ * `running` is the one the next start opens: it gets no gate record, which would lock that start.
  */
 function seedRecords(profile: string, instanceOrigin: string, running = instanceOrigin): void {
   const own = instanceOrigin;
@@ -775,6 +818,7 @@ function seedRecords(profile: string, instanceOrigin: string, running = instance
   const state = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
   const job = (id: string, origin: string) => ({ id, origin, touchedAt: Date.now(), profiles: [], files: [] });
   Object.assign(state, {
+    partitions: [...new Set([...((state.partitions as string[] | undefined) ?? []), 'persist:bulwark'])],
     importJobs: [job('own-job', own), job('other-job', APP_ORIGIN)],
     recentFilesOrigins: [own, APP_ORIGIN],
     keystoreOrigins: [own, APP_ORIGIN],

@@ -137,26 +137,27 @@ export function noteCrashRun(dir: string, origin: string, at = Date.now()): void
 
 /**
  * The crash files of `origin`'s runs: those written after a run for it started and before the
- * next run did. One from before any run was noted is the standalone page's.
+ * next run did. One from before any run was noted is `legacy`'s: the standalone page's, or the
+ * one server the profile ran (wipe-scope.ts `legacyOwner`).
  */
-export function crashFilesOf(crashes: readonly CrashFile[], runs: readonly CrashRun[], origin: string): CrashFile[] {
+export function crashFilesOf(crashes: readonly CrashFile[], runs: readonly CrashRun[], origin: string, legacy: string = APP_ORIGIN): CrashFile[] {
   const page = crashPageOf(origin);
-  const standalone = crashPageOf(APP_ORIGIN);
+  const unnoted = crashPageOf(legacy);
   const ordered = [...runs].sort((a, b) => a.at - b.at);
   return crashes.filter((crash) => {
     const run = ordered.filter((candidate) => candidate.at <= crash.createdAt).at(-1);
-    return (run?.page ?? standalone) === page;
+    return (run?.page ?? unnoted) === page;
   });
 }
 
 /** A server's wipe: its crash files go. Null: all of them, and the run list with them. */
-export function removeCrashFilesOf(dir: string, origin: string | null): void {
+export function removeCrashFilesOf(dir: string, origin: string | null, legacy: string = APP_ORIGIN): void {
   if (origin === null) {
     removeAllCrashFiles(dir);
     rmSync(path.join(dir, RUNS_FILE), { force: true });
     return;
   }
-  for (const crash of crashFilesOf(listCrashFiles(dir), readCrashRuns(dir), origin)) {
+  for (const crash of crashFilesOf(listCrashFiles(dir), readCrashRuns(dir), origin, legacy)) {
     try {
       removeCrash(dir, crash);
     } catch (error) {

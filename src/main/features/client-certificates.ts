@@ -61,9 +61,10 @@ type StoredChoice = { fingerprint: string; account?: string; origin?: string };
 
 /**
  * `origin`: the page the choices are made in, which `clear` takes alone; null takes every
- * page's. A choice from before choices named their page is the standalone page's.
+ * page's. A choice from before choices named their page is `legacy`'s: the standalone page's,
+ * or for a wipe the one server the profile ran (wipe-scope.ts `legacyOwner`).
  */
-function storedChoices(state: StateFile, account: () => string | null, origin: string | null): RememberedChoices {
+function storedChoices(state: StateFile, account: () => string | null, origin: string | null, legacy?: string): RememberedChoices {
   const keep = (entries: [string, StoredChoice][]) => {
     if (entries.length > 0) state.data.certificateChoices = Object.fromEntries(entries);
     else delete state.data.certificateChoices;
@@ -79,7 +80,7 @@ function storedChoices(state: StateFile, account: () => string | null, origin: s
     },
     clear: () => {
       const entries = Object.entries(state.data.certificateChoices ?? {});
-      const left = entries.filter(([, choice]) => !wipeCovers(origin, choice.origin));
+      const left = entries.filter(([, choice]) => !wipeCovers(origin, choice.origin, legacy));
       if (left.length !== entries.length) keep(left);
     },
     clearAccount: (tag) => {
@@ -196,8 +197,8 @@ class ClientAuth {
       else callback();
     });
     // This run's answers are its own server's; the stored choices go by whose they are.
-    addWipeStep(async ({ origin }) => {
-      if (this.state) storedChoices(this.state, () => null, origin).clear();
+    addWipeStep(async ({ origin, legacy }) => {
+      if (this.state) storedChoices(this.state, () => null, origin, legacy).clear();
       this.clearAll?.();
     });
   }

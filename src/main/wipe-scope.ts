@@ -21,15 +21,46 @@ export interface WipeScope {
   origin: string | null;
   /** One account of that origin, or null for all of it. */
   account: string | null;
+  /** Whose a record is that names no page, from before records named one (`legacyOwner`). */
+  legacy: string;
 }
 
 /**
- * Whether a wipe for `origin` takes a record made for `owner`. A record from before records
- * named their origin is the standalone page's: that is what a profile was until its
+ * Whether a wipe for `origin` takes a record made for `owner`. A record that names no page is
+ * `legacy`'s: by default the standalone page's, which is what a profile was until its
  * connection was changed.
  */
-export function wipeCovers(origin: string | null, owner: string | undefined): boolean {
-  return origin === null || (owner ?? APP_ORIGIN) === origin;
+export function wipeCovers(origin: string | null, owner: string | undefined, legacy: string = APP_ORIGIN): boolean {
+  return origin === null || (owner ?? legacy) === origin;
+}
+
+/** The origin a partition stands for: the standalone page's, an instance's, or null when its name says nothing certain. */
+export function originOfPartition(partition: string): string | null {
+  if (partition === 'persist:bulwark') return APP_ORIGIN;
+  const encoded = /^persist:instance-([A-Za-z0-9_-]+)$/.exec(partition)?.[1];
+  if (!encoded) return null;
+  try {
+    const origin = Buffer.from(encoded, 'base64url').toString('utf8');
+    return new URL(origin).origin === origin ? origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whose a record is that names no page, from before records named one: the one server this
+ * profile ever ran, when that is certain, and otherwise the standalone page's. Certain means
+ * every noted partition is that server's, no partition folder is there that nobody noted, and
+ * `unsure` is false: the caller keeps that once it is true, and sets it when a wiped partition
+ * leaves the notes, so a second server, or the same one after its wipe, never inherits what an
+ * earlier one left. Only a flag is kept: no server's address stays behind for this.
+ */
+export function legacyOwner(partitions: readonly string[], unnamedFolder: boolean, unsure: boolean): { owner: string; unsure: boolean } {
+  if (unsure) return { owner: APP_ORIGIN, unsure: true };
+  const origins = new Set(partitions.map(originOfPartition));
+  if (unnamedFolder || origins.has(null) || origins.size > 1) return { owner: APP_ORIGIN, unsure: true };
+  const [only] = [...origins];
+  return { owner: only ?? APP_ORIGIN, unsure: false };
 }
 
 /** Whether `url` is a page of `origin`. A wipe for null covers every page. */
