@@ -755,11 +755,14 @@ export class MenuController {
    * Alt and the letter of a menu with a line only the OS's menu may run, as main read the keys
    * (window-input.ts, from `before-input-event`, which no script in the page reaches). Main
    * opens that menu as the OS's own right then, where it chooses (`ownPlaceFor`), and doesn't
-   * ask the page's bar to open it. Whether it did.
+   * ask the page's bar to open it. A bar that has the keys (Alt was pressed first) is told to
+   * let them go before the menu comes up: the page then puts the focus back where the user was,
+   * and a line such as Paste works on that field, not on the bar. Whether it did.
    */
   private openOwnMenu(window: BrowserWindow, id: string): boolean {
     const found = this.barItems.find(({ entry }) => entry.id === id);
     if (!found?.item.submenu || !holdsOsMenuLine(found.item.submenu.items as unknown as BarSourceItem[])) return false;
+    if (this.barShown.has(window)) this.showBar(window, { visible: false });
     this.popupOsMenu(window, found.item.submenu, this.ownPlaceFor(window));
     return true;
   }

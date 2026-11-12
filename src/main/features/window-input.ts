@@ -17,17 +17,22 @@ export function navigateHistory(window: BrowserWindow, direction: 1 | -1): void 
 
 export type AltAction = { type: 'none' } | { type: 'toggle' } | { type: 'open'; id: string };
 
-/** Alt alone shows the strip, and Alt plus a menu's letter opens that menu. AltGr types. */
+/**
+ * Alt alone shows the strip, and Alt plus a menu's letter opens that menu. AltGr types. A letter
+ * the OS repeats while it's held, or one an input method is composing, opens nothing: only the
+ * key going down opens a menu.
+ */
 export class AltTracker {
   private armed = false;
 
-  feed(input: Pick<Input, 'type' | 'key' | 'alt' | 'control' | 'meta' | 'shift'>, entries: readonly MenuBarEntry[]): AltAction {
+  feed(input: Pick<Input, 'type' | 'key' | 'alt' | 'control' | 'meta' | 'shift'> & Partial<Pick<Input, 'isAutoRepeat' | 'isComposing' | 'modifiers'>>, entries: readonly MenuBarEntry[]): AltAction {
     if (input.type === 'keyDown') {
       if (input.key === 'Alt') {
         this.armed = !input.control && !input.meta && !input.shift;
         return { type: 'none' };
       }
       this.armed = false;
+      if (input.isAutoRepeat === true || input.modifiers?.includes('isautorepeat') || input.isComposing === true) return { type: 'none' };
       if (input.alt && !input.control && !input.meta && !input.shift && input.key.length === 1) {
         const found = entries.find((entry) => entry.mnemonic === input.key.toLowerCase());
         if (found) return { type: 'open', id: found.id };

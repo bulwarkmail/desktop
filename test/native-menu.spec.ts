@@ -13,6 +13,7 @@ import { closeDictionaryDownloads, DEAD_DICTIONARY_URL } from '../src/main/spell
 import { APP_ORIGIN, fakeOsIntegration, launch, opened, shownPage, launchStandalone, prompts, removeProfile, tempProfile, waitForLogin } from './helpers';
 import { clickMenuItem, lastMenu, menuCount, menuItem, pageWith, pickNext, recordMenus, type SeenItem } from './native-helpers';
 import { startHostileInstance, type HostileInstance } from './support/hostile-instance-2';
+import { startEditMenuInstance, type EditMenuInstance } from './support/edit-menu-instance';
 import { startInputInstance, type InputInstance } from './support/input-instance';
 
 test.describe('the pure parts', () => {
@@ -2540,6 +2541,209 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
       await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Insert', code: 'Insert', windowsVirtualKeyCode: 45, nativeVirtualKeyCode: 45, modifiers: 8 });
       await expect.poll(pastes, { timeout: 5_000 }).toBe(2);
       await cdp.detach();
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+});
+
+test.describe('the system\'s Edit menu comes up only for the user\'s own Alt and letter', () => {
+  // An instance whose page calls for the Edit menu by every route it has (test/support/edit-menu-instance.ts).
+  // Native menus are stood in for: what one would show is recorded and kept, so a test can stand in
+  // for the user's pick by running the line's own click, as a pick in the system's menu does.
+  test.skip(process.platform !== 'win32', 'the page draws the bar on Windows and Linux; Windows here');
+  let instance: EditMenuInstance;
+  // Recent files come from this empty folder, never the user's own.
+  let recent = '';
+  test.beforeAll(async () => {
+    instance = await startEditMenuInstance(3841);
+    recent = mkdtempSync(path.join(tmpdir(), 'bw-edit-menu-recent-'));
+  });
+  test.afterAll(() => {
+    instance?.close();
+    rmSync(recent, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
+  });
+
+  type Shown = { roles: string[]; labels: string[]; x?: number; y?: number };
+  type Cdp = Awaited<ReturnType<ReturnType<Page['context']>['newCDPSession']>>;
+  const seenOf = (kind: string) => instance.seen.filter((entry) => entry.kind === kind).map((entry) => entry.body);
+
+  /** The instance's page in `mode`, every outside program stood in for, native menus stood in for from before it loads. */
+  async function openInstance(profile: string, mode: EditMenuInstance['mode']): Promise<{ app: ElectronApplication; page: Page }> {
+    instance.seen.length = 0;
+    instance.mode = 'idle';
+    const app = await launch(profile, `--instance=${instance.origin}/`, '--ignore-certificate-errors', '--bulwark-test-no-native', `--bulwark-test-recent-dir=${recent}`);
+    const page = await shownPage(app);
+    await app.evaluate(({ app: electronApp, shell }) => {
+      electronApp.relaunch = () => undefined;
+      shell.openPath = async () => '';
+      shell.showItemInFolder = () => undefined;
+    });
+    await fakeOsIntegration(app, 1);
+    await expect.poll(() => seenOf('bridge').length).toBeGreaterThan(0);
+    await expect.poll(() => app.evaluate(() => (globalThis as unknown as { __bulwarkOs: { hub: { locked: boolean } } }).__bulwarkOs.hub.locked), { timeout: 30_000 }).toBe(false);
+    await app.evaluate(({ Menu }) => {
+      const g = globalThis as unknown as { __shown: unknown[]; __held: { menu: unknown; callback?: () => void } | null };
+      g.__shown = [];
+      g.__held = null;
+      Menu.prototype.popup = function popup(this: { items: { role?: string; label?: string }[] }, options?: { x?: number; y?: number; callback?: () => void }) {
+        g.__shown.push({ roles: this.items.map((item) => item.role ?? ''), labels: this.items.map((item) => item.label ?? ''), x: options?.x, y: options?.y });
+        g.__held = { menu: this, callback: options?.callback };
+      } as never;
+    });
+    instance.seen.length = 0;
+    instance.mode = mode;
+    await page.reload();
+    await expect.poll(() => seenOf('ready').length, { timeout: 30_000 }).toBeGreaterThan(0);
+    return { app, page };
+  }
+  const shownMenus = (app: ElectronApplication) => app.evaluate(() => (globalThis as unknown as { __shown: Shown[] }).__shown.splice(0));
+  const withPaste = (list: Shown[]) => list.filter((menu) => menu.roles.some((role) => role.toLowerCase().startsWith('paste')));
+
+  /** Stands in for the user picking a line of the menu that is up: its own click, as the system's menu runs it; then the menu closes. */
+  const pick = (app: ElectronApplication, role: string) => app.evaluate(({ BrowserWindow }, wanted) => {
+    const g = globalThis as unknown as { __held: { menu: { items: { role?: string; click: (...a: unknown[]) => void }[] }; callback?: () => void } | null };
+    const held = g.__held;
+    if (!held) return false;
+    const item = held.menu.items.find((line) => (line.role ?? '').toLowerCase() === wanted);
+    const window = BrowserWindow.getAllWindows().find((w) => w.isVisible())!;
+    if (item) item.click(undefined, window, window.webContents);
+    g.__held = null;
+    setTimeout(() => held.callback?.(), 0);
+    return !!item;
+  }, role);
+
+  const key = (cdp: Cdp, type: 'rawKeyDown' | 'keyUp' | 'char', k: string, code: string, vk: number, modifiers: number, text?: string) =>
+    cdp.send('Input.dispatchKeyEvent', { type, key: k, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers, ...(text ? { text, unmodifiedText: text } : {}) });
+  /** Alt held while a letter goes down, as the OS sends it through the browser's input path. */
+  async function altAnd(cdp: Cdp, letter: string, vk: number, extra = 0): Promise<void> {
+    await key(cdp, 'rawKeyDown', 'Alt', 'AltLeft', 18, 1);
+    await key(cdp, 'rawKeyDown', letter, `Key${letter.toUpperCase()}`, vk, 1 | extra);
+    await key(cdp, 'keyUp', letter, `Key${letter.toUpperCase()}`, vk, 1 | extra);
+    await key(cdp, 'keyUp', 'Alt', 'AltLeft', 18, 0);
+  }
+
+  test('nothing the page calls brings up a menu with Paste: every name, a loop of six seconds, while the user clicks, drags and types', async () => {
+    const profile = tempProfile('edit-many-calls');
+    const { app, page } = await openInstance(profile, 'many-calls');
+    try {
+      const cdp = await page.context().newCDPSession(page);
+      await page.mouse.click(220, 12);
+      await page.waitForTimeout(150);
+      await page.mouse.move(220, 12);
+      await page.mouse.down();
+      for (let step = 1; step <= 8; step += 1) {
+        await page.mouse.move(220 + step * 12, 12 + step * 20);
+        await page.waitForTimeout(40);
+      }
+      await page.mouse.up();
+      await page.mouse.click(340, 19);
+      for (const [k, code, vk] of [['p', 'KeyP', 80], ['Enter', 'Enter', 13], [' ', 'Space', 32]] as const) {
+        await key(cdp, 'rawKeyDown', k, code, vk, 0);
+        await key(cdp, 'keyUp', k, code, vk, 0);
+      }
+      await cdp.detach();
+      await expect.poll(() => seenOf('calls-done').length, { timeout: 30_000 }).toBe(1);
+      const all = await shownMenus(app);
+      expect(all.length, 'the page\'s calls for File and View still open those, so the stand-in is listening').toBeGreaterThan(0);
+      expect(withPaste(all), `menus with Paste the page's calls brought up (of ${all.length} menus, ${JSON.stringify(seenOf('calls-done')[0])})`).toEqual([]);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('the page\'s own menu can\'t hold Paste: a line that says it is Paste only gives the page its id back', async () => {
+    const profile = tempProfile('edit-popup');
+    const { app } = await openInstance(profile, 'popup-paste');
+    try {
+      await expect.poll(async () => (await app.evaluate(() => (globalThis as unknown as { __shown: Shown[] }).__shown.length)), { timeout: 10_000 }).toBe(1);
+      const shown = await shownMenus(app);
+      expect(shown[0].roles.every((role) => role === ''), `roles in the page's menu: ${JSON.stringify(shown[0].roles)}`).toBe(true);
+      // The user picks the first line.
+      await app.evaluate(({ BrowserWindow }) => {
+        const g = globalThis as unknown as { __held: { menu: { items: { click: (...a: unknown[]) => void }[] }; callback?: () => void } };
+        const window = BrowserWindow.getAllWindows().find((w) => w.isVisible())!;
+        g.__held.menu.items[0].click(undefined, window, window.webContents);
+        setTimeout(() => g.__held.callback?.(), 0);
+      });
+      await expect.poll(() => seenOf('popup-answer').length, { timeout: 10_000 }).toBe(1);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(seenOf('popup-answer')[0]).toBe('p1');
+      expect(seenOf('paste-event'), 'pastes').toEqual([]);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('AltGr+E (the euro sign on a German keyboard, Ctrl+Alt on Windows) while typing in a field opens no menu; Alt+E does, at the left edge', async () => {
+    const profile = tempProfile('edit-altgr');
+    const { app, page } = await openInstance(profile, 'keys');
+    try {
+      const cdp = await page.context().newCDPSession(page);
+      // AltGr as Windows sends it: a left Ctrl, the right Alt, then E with both held.
+      await key(cdp, 'rawKeyDown', 'Control', 'ControlLeft', 17, 2);
+      await key(cdp, 'rawKeyDown', 'AltGraph', 'AltRight', 18, 3);
+      await key(cdp, 'rawKeyDown', '€', 'KeyE', 69, 3);
+      await key(cdp, 'char', '€', 'KeyE', 69, 3, '€');
+      await key(cdp, 'keyUp', '€', 'KeyE', 69, 3);
+      await key(cdp, 'keyUp', 'AltGraph', 'AltRight', 18, 2);
+      await key(cdp, 'keyUp', 'Control', 'ControlLeft', 17, 0);
+      await page.waitForTimeout(500);
+      const afterAltGr = await shownMenus(app);
+      const events = seenOf('bar-event');
+      // Ctrl+Alt+E with no character, Alt+Shift+E: no menu either.
+      await key(cdp, 'rawKeyDown', 'Control', 'ControlLeft', 17, 2);
+      await altAnd(cdp, 'e', 69, 2);
+      await key(cdp, 'keyUp', 'Control', 'ControlLeft', 17, 0);
+      await altAnd(cdp, 'e', 69, 8);
+      await page.waitForTimeout(500);
+      const afterChords = await shownMenus(app);
+      // The user's own Alt+E.
+      await altAnd(cdp, 'e', 69);
+      await page.waitForTimeout(500);
+      const afterAltE = await shownMenus(app);
+      await cdp.detach();
+      expect(afterAltGr, 'menus after AltGr+E').toEqual([]);
+      expect(events, 'the page\'s bar asked to open something after AltGr+E').toEqual([]);
+      expect(afterChords, 'menus after Ctrl+Alt+E and Alt+Shift+E').toEqual([]);
+      expect(afterAltE.map(({ x, y, roles }) => ({ x, y, paste: roles.includes('paste') })), 'Alt+E').toEqual([{ x: 0, y: 56, paste: true }]);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('Paste picked in the menu Alt+E opens lands in the field, also when Alt was pressed first and the page\'s bar had the keys', async () => {
+    const profile = tempProfile('edit-focus');
+    const { app, page } = await openInstance(profile, 'bar-focus');
+    try {
+      expect((seenOf('ready')[0] as { focused: boolean }).focused, 'the field has the focus to start with').toBe(true);
+      const cdp = await page.context().newCDPSession(page);
+      // 1. Typing in the field, the user presses Alt+E and picks Paste.
+      await altAnd(cdp, 'e', 69);
+      await page.waitForTimeout(400);
+      expect(withPaste(await shownMenus(app)), 'Alt+E brought up the menu with Paste').toHaveLength(1);
+      expect(await pick(app, 'paste'), 'Paste picked').toBe(true);
+      await expect.poll(() => seenOf('paste-event').length, { timeout: 5_000 }).toBe(1);
+      await page.waitForTimeout(1_200);
+      // 2. Alt pressed and let go first (the bar has the keys and the focus), then Alt+E and Paste.
+      await key(cdp, 'rawKeyDown', 'Alt', 'AltLeft', 18, 1);
+      await key(cdp, 'keyUp', 'Alt', 'AltLeft', 18, 0);
+      await expect.poll(() => (seenOf('bar-event') as { visible?: boolean }[]).filter((event) => event.visible).length, { timeout: 5_000 }).toBeGreaterThan(0);
+      await page.waitForTimeout(300);
+      await altAnd(cdp, 'e', 69);
+      await page.waitForTimeout(400);
+      expect(withPaste(await shownMenus(app)), 'Alt+E with the bar holding the keys brought up the menu with Paste').toHaveLength(1);
+      expect(await pick(app, 'paste'), 'Paste picked').toBe(true);
+      await expect.poll(() => seenOf('paste-event').length, { timeout: 5_000 }).toBe(2);
+      await page.waitForTimeout(500);
+      await cdp.detach();
+      const targets = (seenOf('paste-event') as { target: string }[]).map((paste) => paste.target);
+      expect(targets[0], 'Alt+E, Paste while typing in the field').toBe('field');
+      expect(targets[1], `Alt, then Alt+E, Paste (bar events: ${JSON.stringify(seenOf('bar-event'))})`).toBe('field');
     } finally {
       await app.close().catch(() => {});
       removeProfile(profile);
