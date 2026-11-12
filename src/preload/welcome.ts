@@ -6,7 +6,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { CHANNEL } from '../shared/bridge';
 
-function options(): { allowStandalone: boolean; instanceUrl: string | null; urlLocked: boolean; askTelemetry?: boolean; askCrashReports?: boolean; dark?: boolean | null } {
+function options(): { allowStandalone: boolean; instanceUrl: string | null; urlLocked: boolean; page?: 'org' | null; askTelemetry?: boolean; askCrashReports?: boolean; dark?: boolean | null } {
   const prefix = '--bulwark-welcome=';
   try {
     return JSON.parse(decodeURIComponent(process.argv.find((arg) => arg.startsWith(prefix))?.slice(prefix.length) ?? ''));

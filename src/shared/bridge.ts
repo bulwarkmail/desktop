@@ -1178,6 +1178,13 @@ export const CHANNEL = {
 } as const;
 
 /** What main passes to the preload through additionalArguments. */
+/**
+ * The script world the shell reads a blob: of the page in (a PDF in the file preview's frame,
+ * to print it): the page's CSP keeps blob: out of connect-src, and this world's own CSP lets
+ * it in. Only the main process runs code there.
+ */
+export const BLOB_READ_WORLD = 7301;
+
 export const PRELOAD_ARG = {
   allowedOrigin: '--bulwark-origin=',
   mode: '--bulwark-mode=',

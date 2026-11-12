@@ -23,6 +23,8 @@ interface Options {
   /** What main answers to the email step. */
   emailAnswer?: { ok: boolean; error?: string; next?: string };
   dark?: boolean | null;
+  /** The step main asks for: 'org' after "Use my organisation's Bulwark instead". */
+  page?: 'org';
 }
 
 async function open(page: Page, options: Options = {}): Promise<void> {
@@ -30,7 +32,7 @@ async function open(page: Page, options: Options = {}): Promise<void> {
     const calls: unknown[] = [];
     (window as unknown as { calls: unknown[] }).calls = calls;
     (window as unknown as { bulwarkWelcome: unknown }).bulwarkWelcome = {
-      options: { allowStandalone: true, instanceUrl: null, urlLocked: false, askTelemetry: true, askCrashReports: true, dark: opts.dark ?? null },
+      options: { allowStandalone: true, instanceUrl: null, urlLocked: false, page: opts.page ?? null, askTelemetry: true, askCrashReports: true, dark: opts.dark ?? null },
       choose: async (choice: unknown) => {
         calls.push(['choose', choice]);
         return opts.emailAnswer ?? { ok: true, next: 'privacy' };
@@ -41,7 +43,7 @@ async function open(page: Page, options: Options = {}): Promise<void> {
     };
   }, options);
   await page.goto(`data:text/html;charset=utf-8;base64,${Buffer.from(builtPage()).toString('base64')}`);
-  await page.locator('#email').waitFor();
+  await page.locator(options.page === 'org' ? '#url' : '#email').waitFor();
 }
 
 const calls = (page: Page) => page.evaluate(() => (window as unknown as { calls: unknown[] }).calls);
@@ -62,6 +64,22 @@ test.describe('the first-run page', () => {
     await page.fill('#email', 'sam@example.org');
     await expect(page.locator('#email-error')).toBeHidden();
     await expect(page.locator('#email')).not.toHaveAttribute('aria-invalid', 'true');
+  });
+
+  test("opens on the web address step when the user asked for their organisation's Bulwark (desktop#5)", async ({ page }) => {
+    await open(page, { page: 'org' });
+    await expect(page.locator('#url')).toBeVisible();
+    await expect(page.locator('#url')).toBeFocused();
+    await expect(page.locator('#email')).toBeHidden();
+    // Back still leads to the email step.
+    await page.click('#org-back');
+    await expect(page.locator('#email')).toBeVisible();
+  });
+
+  test('opens on the email step otherwise', async ({ page }) => {
+    await open(page);
+    await expect(page.locator('#email')).toBeVisible();
+    await expect(page.locator('#url')).toBeHidden();
   });
 
   test('a web address in the email field leads to the organisation step, with it filled in', async ({ page }) => {

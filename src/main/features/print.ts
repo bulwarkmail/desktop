@@ -13,9 +13,9 @@
  * opens.
  */
 
-import { app, BrowserWindow, webContents, type WebContents } from 'electron';
+import { app, BrowserWindow, webContents, type WebContents, type WebFrameMain } from 'electron';
 import { CHANNEL, type MenuState, type PrintPreviewOutcome } from '../../shared/bridge';
-import { watchPdfViewers, windowPdfViewer } from '../pdf-viewer-print';
+import { framePdf, isWindowPdfViewer, printInViewer, watchPdfViewers, windowPdfViewer } from '../pdf-viewer-print';
 import { PrintPreviews } from '../print-preview';
 import { readPreviewRequest } from '../print-rules';
 import type { Feature } from './index';
@@ -41,6 +41,17 @@ export function printPreviews(): PrintPreviews | null {
 function previewPdfWindow(window: BrowserWindow, allowed: { print: boolean; pdf: boolean }): void {
   if (!previews || window.isDestroyed()) return;
   void previews.open({ parent: window, source: { kind: 'pdfWindow', contents: window.webContents }, title: window.getTitle(), allowed });
+}
+
+/** The PDF in a frame of `window`'s page (the file preview's), from its bytes. */
+async function printFramePdf(window: BrowserWindow, viewer: WebFrameMain, allowed: { print: boolean; pdf: boolean }): Promise<void> {
+  const pdf = await framePdf(window.webContents, viewer);
+  if (!previews || window.isDestroyed()) return;
+  if (!pdf) {
+    printInViewer(viewer);
+    return;
+  }
+  void previews.open({ parent: window, source: { kind: 'pdf', data: pdf.data }, title: pdf.title || window.getTitle(), allowed });
 }
 
 /**
@@ -79,9 +90,12 @@ export const printFeature: Feature = {
     // The app's windows only: the preview's own viewer is on sessions of its own.
     const watchContents = (contents: WebContents) => {
       if (contents.session !== ctx.session) return;
-      watchPdfViewers(contents, () => {
+      watchPdfViewers(contents, (viewer) => {
         const window = BrowserWindow.fromWebContents(contents);
-        if (window) previewPdfWindow(window, allowedBy(ctx.menu.commandState(window)));
+        if (!window) return;
+        const allowed = allowedBy(ctx.menu.commandState(window));
+        if (isWindowPdfViewer(viewer)) previewPdfWindow(window, allowed);
+        else void printFramePdf(window, viewer, allowed);
       });
     };
     app.on('web-contents-created', (_event, contents) => watchContents(contents));
