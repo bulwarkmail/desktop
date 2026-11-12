@@ -15,6 +15,7 @@ import { openSignInWindow } from '../navigation';
 import { isPluginSignIn, parse } from '../navigation-rules';
 import { serverOrigin } from '../server-address';
 import { uiLanguageNow } from '../strings';
+import { APP_ORIGIN } from '../../server/protocol';
 import { addWipeStep } from './local-wipe';
 import { policies } from './policies';
 import type { Feature, FeatureContext } from '.';
@@ -75,7 +76,10 @@ export function setupBrowserSignIn(ctx: FeatureContext): LoopbackSignIn {
     },
   });
   active = signIn;
-  addWipeStep(async () => remembered.clear());
+  // The ports are kept per mail server, and only the standalone page signs in to those.
+  addWipeStep(async ({ origin }) => {
+    if (origin === null || origin === APP_ORIGIN) remembered.clear();
+  });
 
   ctx.handle(CHANNEL.authBegin, async (event: IpcMainInvokeEvent, window, request): Promise<BrowserSignInBegin> => {
     if (!allowedByPolicy()) return { ok: false, error: 'policy' };

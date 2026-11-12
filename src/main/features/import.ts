@@ -31,6 +31,7 @@ import { runImportWorker, type WorkerOutcome } from '../import-worker-client';
 import type { WorkerScan } from '../import-worker';
 import type { StoredImportJob } from '../state';
 import { strings } from '../strings';
+import { wipeCovers } from '../wipe-scope';
 import { addWipeStep } from './local-wipe';
 import type { Feature } from './index';
 import { showMessageBox } from '../message-box';
@@ -117,14 +118,14 @@ export const importFeature: Feature = {
     };
     saveJobs(stored().filter((job) => Date.now() - job.touchedAt < JOB_MAX_AGE_MS));
 
-    // A wipe takes the paths the user confirmed and every way to read them, for all origins:
-    // the state file is the profile's, whichever page is open.
-    addWipeStep(async () => {
+    // A wipe takes the paths the user confirmed and every way to read them: a server's wipe the
+    // jobs started from its page, the policy's every page's. What this run holds is this page's.
+    addWipeStep(async ({ origin }) => {
       await grants.releaseAll();
       candidates = new Map();
       bookHandles = new Map();
       profiles = [];
-      ctx.state.data.importJobs = [];
+      ctx.state.data.importJobs = (ctx.state.data.importJobs ?? []).filter((job) => !wipeCovers(origin, job.origin));
       ctx.state.save();
     });
 

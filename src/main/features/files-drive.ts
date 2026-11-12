@@ -30,6 +30,8 @@ import { driveNotice, driveSummaryChanged, setDriveHooks } from '../files/drive-
 import type { Rescued } from '../files/drive-rescue';
 import { filesRegistry } from '../files/registry';
 import { native } from '../native';
+import { StateFile } from '../state';
+import type { DrivePlaces } from '../uninstall-cleanup';
 import { takeUserGesture, watchUserGestures } from '../user-gesture';
 import { forgetRootState } from './files-folders';
 import { addWipeStep } from './local-wipe';
@@ -231,13 +233,31 @@ function driveController(ctx?: Pick<FeatureContext, 'state' | 'windows' | 'showM
   return controller;
 }
 
+/**
+ * The drive of the profile in `profile`, for `--uninstall-cleanup` (uninstall-cleanup.ts): the
+ * same provider, folder and documents the running app uses, and what the profile kept about it.
+ */
+export function uninstallDrivePlaces(profile: string): DrivePlaces {
+  const state = new StateFile(path.join(profile, 'shell-state.json'));
+  return {
+    profile,
+    provider: driveProvider({ chosen: testArgument('provider'), testBuild: __BULWARK_TEST_BUILD__ }),
+    base: driveBase({ chosen: testArgument('drive-dir'), testBuild: __BULWARK_TEST_BUILD__, profile, home: homedir() }),
+    documents: testArgument('documents-dir') ?? app.getPath('documents'),
+    stored: state.data.filesDrive ?? {},
+    supported: process.platform === 'win32' && windowsBuild() >= FIRST_BUILD,
+    version: app.getVersion(),
+  };
+}
+
 /** A wipe before the feature started had no profile to clear the wishes from. */
 let wipedEarly = false;
 
-// Whatever the mode, and before the feature's setup: a wipe at the start comes first.
-addWipeStep(async () => {
-  if (!controller) wipedEarly = true;
-  await driveController()?.wipe();
+// Whatever the mode, and before the feature's setup: a wipe at the start comes first. A server's
+// wipe takes the accounts turned on from its page (DriveController.wipe).
+addWipeStep(async ({ origin, legacy }) => {
+  if (!controller && origin === null) wipedEarly = true;
+  await driveController()?.wipe(origin, legacy);
 });
 
 /** For the folders feature: where the drive keeps its folders, which no folder pair may touch. */

@@ -34,6 +34,7 @@ import {
 import { requestGate, responseGate } from '../request-gate';
 import type { StateFile } from '../state';
 import { fill, strings } from '../strings';
+import { wipeCovers } from '../wipe-scope';
 import { addWipeStep } from './local-wipe';
 import { policies } from './policies';
 import type { Feature, FeatureContext } from '.';
@@ -56,9 +57,14 @@ function accountTag(account: string): string {
   return createHash('sha256').update(account).digest('base64url').slice(0, 16);
 }
 
-type StoredChoice = { fingerprint: string; account?: string };
+type StoredChoice = { fingerprint: string; account?: string; origin?: string };
 
-function storedChoices(state: StateFile, account: () => string | null): RememberedChoices {
+/**
+ * `origin`: the page the choices are made in, which `clear` takes alone; null takes every
+ * page's. A choice from before choices named their page is `legacy`'s: the standalone page's,
+ * or for a wipe the one server the profile ran (wipe-scope.ts `legacyOwner`).
+ */
+function storedChoices(state: StateFile, account: () => string | null, origin: string | null, legacy?: string): RememberedChoices {
   const keep = (entries: [string, StoredChoice][]) => {
     if (entries.length > 0) state.data.certificateChoices = Object.fromEntries(entries);
     else delete state.data.certificateChoices;
@@ -69,11 +75,13 @@ function storedChoices(state: StateFile, account: () => string | null): Remember
     set: (hostPort, fingerprint) => {
       const entries = Object.entries(state.data.certificateChoices ?? {}).filter(([host]) => host !== hostPort);
       const tag = account();
-      const choice: StoredChoice = { fingerprint, ...(tag ? { account: tag } : {}) };
+      const choice: StoredChoice = { fingerprint, ...(tag ? { account: tag } : {}), ...(origin ? { origin } : {}) };
       keep([...entries, [hostPort, choice] as [string, StoredChoice]].slice(-MAX_CHOICES));
     },
     clear: () => {
-      if (state.data.certificateChoices) keep([]);
+      const entries = Object.entries(state.data.certificateChoices ?? {});
+      const left = entries.filter(([, choice]) => !wipeCovers(origin, choice.origin, legacy));
+      if (left.length !== entries.length) keep(left);
     },
     clearAccount: (tag) => {
       const entries = Object.entries(state.data.certificateChoices ?? {});
@@ -188,8 +196,9 @@ class ClientAuth {
       if (this.answer) this.answer(contents, hostPort, list, callback);
       else callback();
     });
-    addWipeStep(async () => {
-      if (this.state) storedChoices(this.state, () => null).clear();
+    // This run's answers are its own server's; the stored choices go by whose they are.
+    addWipeStep(async ({ origin, legacy }) => {
+      if (this.state) storedChoices(this.state, () => null, origin, legacy).clear();
       this.clearAll?.();
     });
   }
@@ -209,7 +218,7 @@ class ClientAuth {
     const isUserServer = (target: string | null) => !!target && !!ctx.servers?.isKnown(target);
     const chooser = new CertificateChooser<Certificate>({
       rules: () => policies.snapshot.AutoSelectCertificateForUrls.value,
-      choices: storedChoices(ctx.state, () => account),
+      choices: storedChoices(ctx.state, () => account, origin),
       ask: (question, window, signal) => askInDialog(question, window, ctx, signal),
       isUserServer: (hostPort) => isUserServer(targetOrigin(`https://${hostPort}`)),
     });

@@ -9,6 +9,7 @@ import type { Mode, OsSettings, ThemeColours, UpdateChannel, WindowType } from '
 import type { StoredDrive } from './files/drive-controller';
 import type { PrintMemory } from './print-rules';
 import type { ResumeMark } from './resume-rules';
+import type { PendingRemoval } from './wipe-scope';
 
 export interface StoredBounds {
   x: number;
@@ -100,8 +101,18 @@ export interface ShellState {
   askConnection?: boolean;
   /** WipeOfflineData values already acted on, so each deletes once, across restarts. */
   policyWipes?: string[];
-  /** Every partition this profile has used: a wipe covers them all. */
+  /** Every partition this profile has used: the policy's wipe covers them all, a server's wipe its own. */
   partitions?: string[];
+  /** Wiped partitions whose folder goes aside at the next start, before any session has it (wipe-scope.ts). */
+  partitionsToRemove?: PendingRemoval[];
+  /** Wiped partitions' folders moved aside under `Partitions`, removed once their files are free. */
+  partitionsAside?: string[];
+  /**
+   * Whose a record is that names no page can't be told for certain: this profile ran more than
+   * one server, or a wiped one (wipe-scope.ts `legacyOwner`). Such a record is then the
+   * standalone page's. Kept once true.
+   */
+  legacyUnsure?: boolean;
   /** A hash of the key DPAPI stopped opening, once the user was told their sign-ins went with it. */
   keyLossTold?: string;
   /** Instances the user said may use the OS keystore. Revocable in the webmail's settings. */
@@ -111,10 +122,11 @@ export interface ShellState {
   /** The browser sign-in page's port per mail server, so what a password manager saved keeps matching. */
   signInPorts?: Record<string, number>;
   /**
-   * The client certificate remembered for a `host:port`, by fingerprint, and a hash of the account
-   * it was chosen in. Gone at that account's sign-out, and all of them at the last one.
+   * The client certificate remembered for a `host:port`, by fingerprint, a hash of the account
+   * it was chosen in, and the page it was chosen in (none: the standalone page's). Gone at that
+   * account's sign-out, and all of that page's at its last one.
    */
-  certificateChoices?: Record<string, { fingerprint: string; account?: string }>;
+  certificateChoices?: Record<string, { fingerprint: string; account?: string; origin?: string }>;
   /** Where File > Save as… and File > Open… last were: the next dialog starts there. */
   saveAsFolder?: string;
   openFolder?: string;

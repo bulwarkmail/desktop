@@ -32,9 +32,10 @@ import { addRestartTimers, askToRestart, policies } from './features/policies';
 import { devToolsForcedOff } from './features/dev-tools';
 import { privacy } from './features/privacy';
 import { clientAuth } from './features/client-certificates';
+import { uninstallDrivePlaces } from './features/files-drive';
 import { createChannels, registerBridge } from './ipc';
 import { durableWrite, holdsAppLockRecords, KEY_CHECK_FOLDER, KEY_CHECK_SWITCH, KEY_INIT_SWITCH, keyInitArgs, keyOnDisk, keyOpens, KEYS_FOLDER, savedKey, saveKey, settleKeyBeforeChromium, waitForKeyOnDisk } from './key-on-disk';
-import { addWipeStep, notePartition, restartAfterWipe } from './features/local-wipe';
+import { addWipeStep, notePartition, readyToOpen, removeWipedPartitions, restartAfterWipe, wipeForConnectionChange } from './features/local-wipe';
 import { native } from './native';
 import { LocalAdmin } from './local-admin';
 import { requestGate } from './request-gate';
@@ -98,7 +99,11 @@ if (asksForUninstallCleanup(process.argv)) {
   const allowed = process.platform === 'win32' && (!__BULWARK_TEST_BUILD__ || root !== 'HKCU');
   if (allowed) {
     const local = __BULWARK_TEST_BUILD__ ? argValue('bulwark-test-local-dir') ?? null : process.env.LOCALAPPDATA ?? null;
-    await uninstallCleanup({ root, exe: process.execPath, sendTo: sendToFolder(), local }, native().system.registry).catch(() => undefined);
+    // The Files drive of this user's profile. A test build's only when it names its profile, and
+    // never a package with a test profile compiled in.
+    const profile = __BULWARK_TEST_BUILD__ ? argValue('bulwark-user-data') ?? null : __BULWARK_TEST_PROFILE__ ? null : app.getPath('userData');
+    const drive = profile ? { helper: native().files, places: uninstallDrivePlaces(profile) } : null;
+    await uninstallCleanup({ root, exe: process.execPath, sendTo: sendToFolder(), local }, native().system.registry, drive).catch(() => undefined);
   }
   app.exit(allowed || process.platform !== 'win32' ? 0 : 1);
   await new Promise(() => {});
@@ -167,6 +172,8 @@ if (gotLock) {
 }
 
 const stateFile = new StateFile(path.join(app.getPath('userData'), 'shell-state.json'));
+// Before any session can open one of them: what the last wipe left of its partitions.
+if (gotLock) removeWipedPartitions(app.getPath('userData'), stateFile);
 policies.attachState(stateFile);
 if (gotLock) privacy.start(stateFile);
 if (gotLock) clientAuth.start(stateFile);
@@ -201,6 +208,8 @@ let menu: MenuController | null = null;
 const zoom = new ZoomController(stateFile);
 /** A bulwark:// link from before anyone was signed in: a pop-out borrows the main window's session. */
 let pendingDeepLink: WindowLink | null = null;
+/** The page this run is on and its partition: what "Change connection…" offers to remove. */
+let runningOn: { mode: Mode; origin: string; session: Electron.Session } | null = null;
 let sessionReady = false;
 const linkLimit = new LinkRateLimit();
 
@@ -296,8 +305,9 @@ function createWindowManager(mode: Mode, origin: string, session: Electron.Sessi
   });
   zoom.attach(windowManager);
   menu!.attach(windowManager);
-  // Windows to bring back can't be told apart by account, and bringing them back costs little.
-  addWipeStep(async () => windowManager?.forgetSession(), { perAccount: true });
+  // Windows to bring back can't be told apart by account, and bringing them back costs little. By
+  // server they can: a server's wipe takes its own pages.
+  addWipeStep(async ({ origin, account }) => windowManager?.forgetSession(account === null ? origin : null), { perAccount: true });
   windowManager.on('sessionReady', onSessionReady);
   // A development switch for the test of the tray's hook, until the tray exists.
   if (__BULWARK_TEST_BUILD__ && DEV && process.argv.includes('--bulwark-test-close-to-background')) windowManager.setCloseToBackground(() => true);
@@ -395,7 +405,40 @@ async function keySafeOnDisk(instance: boolean): Promise<boolean> {
  */
 let serverAwaitingInit: ServerProcess | null = null;
 
+/** The question below is up, and is the only window: closing it is no quit by itself. */
+let waitingForFolder = false;
+
+/**
+ * A wiped partition's folder still in place: no session opens it until it has gone aside, as
+ * what that session kept would go with it later. The user sees why and can try again or quit.
+ */
+async function folderReady(partition: string, host: string | null): Promise<boolean> {
+  waitingForFolder = true;
+  let ready: boolean;
+  try {
+    ready = await readyToOpen(app.getPath('userData'), stateFile, partition, async () => {
+      const text = strings();
+      const { response } = await showMessageBox({
+        type: 'warning',
+        title: 'Bulwark',
+        message: host ? text.wipedFolderHeldTitle(host) : text.wipedFolderHeldTitleApp,
+        detail: text.wipedFolderHeldDetail,
+        buttons: [text.wipedFolderHeldRetry, text.wipedFolderHeldQuit],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      });
+      return response === 0;
+    });
+  } finally {
+    waitingForFolder = false;
+  }
+  if (!ready) app.quit();
+  return ready;
+}
+
 async function bootStandalone(theme: ThemeController): Promise<void> {
+  if (!(await folderReady(APP_PARTITION, null))) return;
   try {
     await bootStandaloneServer(theme);
   } finally {
@@ -465,6 +508,7 @@ async function bootStandaloneServer(theme: ThemeController): Promise<void> {
   });
   keepSignInsOnDisk(session);
   notePartition(stateFile, APP_PARTITION);
+  runningOn = { mode: 'standalone', origin: APP_ORIGIN, session };
   applyPermissionPolicy(session, APP_ORIGIN);
 
   const cors = new CorsInjector(session, APP_ORIGIN);
@@ -576,9 +620,11 @@ async function bootStandaloneServer(theme: ThemeController): Promise<void> {
 async function bootInstance(instanceUrl: string, theme: ThemeController): Promise<void> {
   const origin = new URL(instanceUrl).origin;
   const partition = instancePartition(origin);
+  if (!(await folderReady(partition, new URL(origin).host))) return;
   const session = electronSession.fromPartition(partition);
   keepSignInsOnDisk(session);
   notePartition(stateFile, partition);
+  runningOn = { mode: 'instance', origin, session };
   closeDictionaryDownloads(session);
   applyPermissionPolicy(session, origin);
   const windows = createWindowManager('instance', origin, session, theme, instanceUrl);
@@ -833,10 +879,42 @@ function showMain(options: { hidden?: boolean } = {}): void {
 // Quitting closes the windows, and each may ask first. Nothing is forgotten until all
 // of them have gone, so choosing Stay keeps the mode.
 let switching = false;
+let offering = false;
 
 function switchMode(): void {
-  switching = true;
-  app.quit();
+  if (offering) return;
+  offering = true;
+  void offerToRemoveServer().catch((error) => console.error(error)).finally(() => {
+    offering = false;
+    switching = true;
+    app.quit();
+  });
+}
+
+/**
+ * The server being left keeps its partition, sign-in and offline mail on this device, so coming
+ * back to it finds them. Main offers in its own words to remove them instead; Keep is the safe
+ * default. Nothing a page sent words this question (strings.ts).
+ */
+async function offerToRemoveServer(): Promise<void> {
+  const run = runningOn;
+  if (!run) return;
+  const text = strings();
+  const options: Electron.MessageBoxOptions = {
+    type: 'question',
+    title: 'Bulwark',
+    message: run.mode === 'instance' ? text.connectionWipeTitle(new URL(run.origin).host) : text.connectionWipeTitleApp,
+    detail: text.connectionWipeDetail,
+    buttons: [text.connectionWipeRemove, text.connectionWipeKeep],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  };
+  const parent = windowManager?.mainWindow() ?? null;
+  const { response } = await showMessageBox(parent && !parent.isDestroyed() ? parent : null, options);
+  if (response !== 0) return;
+  const failed = await wipeForConnectionChange(run.session, run.origin, stateFile);
+  if (failed.length > 0) console.warn(`Removing what ${run.origin} kept on this device left: ${failed.join(', ')}`);
 }
 
 /** Where the page can't ask (an older webmail, an error page): the OS's question, never none. */
@@ -932,6 +1010,9 @@ if (gotLock) {
   if (electronRegistersScheme(process.platform, osRegistrationAllowed())) app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME);
 
   app.on('window-all-closed', () => {
+    // The question about a wiped folder still in use is the only window while it's up: its
+    // answer decides whether the start goes on or quits.
+    if (waitingForFolder) return;
     // Closing to the tray hides the main window, so this means there's nothing left.
     if (process.platform !== 'darwin') app.quit();
   });

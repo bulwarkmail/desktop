@@ -11,6 +11,7 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { removeOwn } from '../remove-tree';
 
 export interface StoredFolderRoot {
   id: string;
@@ -162,7 +163,8 @@ export class FolderRootStore {
   /** Everything here, for a wipe. */
   removeAll(): Promise<void> {
     return this.serial(async () => {
-      await rm(this.folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      // Never through a link someone put in it (remove-tree.ts).
+      removeOwn(this.folder);
       this.privateReady = null;
     });
   }

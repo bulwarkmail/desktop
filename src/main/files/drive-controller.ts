@@ -32,7 +32,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, watch, type BigIntStats, type FSWatcher } from 'node:fs';
+import { lstatSync, mkdirSync, readdirSync, realpathSync, watch, type BigIntStats, type FSWatcher } from 'node:fs';
 import path from 'node:path';
 import type {
   FilesDriveLetterState,
@@ -74,6 +74,8 @@ import {
 } from './drive-places';
 import { splitRelative } from './paths';
 import type { RegisteredRoot } from './registry';
+import { removeOwn } from '../remove-tree';
+import { wipeCovers } from '../wipe-scope';
 
 export type DisableReason = 'user' | 'signed-out' | 'suspended' | 'wipe' | 'refused';
 const REASONS: readonly string[] = ['user', 'signed-out', 'suspended', 'wipe', 'refused'];
@@ -91,6 +93,8 @@ export interface StoredDriveAccount {
   createdAt: number;
   /** The account part of its sync root's id. Absent: the account's key alone, as older versions registered it. */
   key?: string;
+  /** The page it was turned on from. Absent: from before this was kept; see `wipe`. */
+  origin?: string;
   /** Signed out: no sync root now, and the next sign-in brings it back. */
   signedOut?: boolean;
   /** Signed out without asking for it: registered, folder kept, not connected until the next sign-in. */
@@ -457,9 +461,10 @@ export class DriveController {
       placeholderState: (absolute) => this.placeholderState(absolute),
       contentAbsent: (absolute) => this.contentAbsent(absolute),
     });
+    const origin = this.deps.consent?.origin ?? stored?.origin;
     this.writeAccounts((accounts) => {
       // Pins wait until the page has placed their paths again.
-      accounts[account] = { label, folder, rootId: root.id, createdAt: root.createdAt, key, ...(live.pins.size > 0 ? { pins: [...live.pins] } : {}) };
+      accounts[account] = { label, folder, rootId: root.id, createdAt: root.createdAt, key, ...(origin ? { origin } : {}), ...(live.pins.size > 0 ? { pins: [...live.pins] } : {}) };
     });
     if (this.deps.watchPins !== false) live.watcher = this.watchPins(live);
     return ok(root);
@@ -654,11 +659,10 @@ export class DriveController {
   private removeFolder(dir: string): void {
     const base = this.base();
     if (!inside(base, dir) || path.win32.relative(base.toLowerCase(), dir.toLowerCase()) === '') return;
-    const facts = lstatOrNull(dir);
-    if (!facts) return;
+    if (!lstatOrNull(dir)) return;
     try {
-      // A link is removed, never what it points to.
-      rmSync(dir, { recursive: !facts.isSymbolicLink(), force: true, maxRetries: 3, retryDelay: 200 });
+      // A link is removed, never what it points to, here or anywhere below (remove-tree.ts).
+      removeOwn(dir, { root: base });
     } catch (error) {
       this.warn(`The drive's folder couldn't be removed: ${(error as Error).message}`);
     }
@@ -813,8 +817,15 @@ export class DriveController {
     this.removeFolder(dir);
   }
 
-  /** The wipe: every sync root of this profile's, their folders, the letter and every wish. */
-  wipe(): Promise<void> {
+  /**
+   * The wipe. Null: every sync root of this profile's, their folders, the letter and every wish.
+   * A server's: the accounts turned on from its page, with their sync roots, folders and the
+   * engine's records, and its yes; another page's stay. An account stored before accounts named
+   * their page is this run's page's if its yes names it, and `legacy`'s otherwise: the one
+   * server the profile ran, or the standalone page's (wipe-scope.ts `legacyOwner`).
+   */
+  wipe(origin: string | null = null, legacy?: string): Promise<void> {
+    if (origin !== null) return this.wipeServer(origin, legacy);
     return this.serial(async () => {
       for (const account of [...this.live.keys()]) await this.stop(account, true);
       for (const entry of Object.values(this.deps.store.read().accounts ?? {})) this.removeFolder(path.win32.join(this.base(), entry.folder));
@@ -825,6 +836,38 @@ export class DriveController {
       this.deps.store.write({});
       this.deps.consent?.clear();
       this.refusedUntil.clear();
+      await this.applyLetter();
+      this.emit();
+    });
+  }
+
+  private wipeServer(origin: string, legacy: string | undefined): Promise<void> {
+    return this.serial(async () => {
+      const { consent } = this.deps;
+      const thisRun = consent?.origin === origin;
+      const owns = (account: string, entry: StoredDriveAccount) =>
+        entry.origin ? entry.origin === origin : (thisRun && consent!.has(account)) || wipeCovers(origin, undefined, legacy);
+      // What's live was turned on by this run's page.
+      if (thisRun) for (const account of [...this.live.keys()]) await this.stop(account, true);
+      const theirs = Object.entries(this.deps.store.read().accounts ?? {}).filter(([account, entry]) => owns(account, entry));
+      for (const [account, entry] of theirs) {
+        this.removeFolder(path.win32.join(this.base(), entry.folder));
+        await this.deps.forgetState?.(entry.rootId).catch(() => {});
+        const key = this.keyOf(account, entry);
+        for (const root of await this.ourRoots()) {
+          if (keyOfRoot(root.id) !== key) continue;
+          if (root.path) this.removeFolder(root.path);
+          await this.unregister(root);
+        }
+        if (thisRun) consent!.remove(account);
+      }
+      this.writeAccounts((accounts) => {
+        for (const [account] of theirs) delete accounts[account];
+      });
+      // No account left: the letter's wish goes with them, as after the whole wipe.
+      if (Object.keys(this.deps.store.read().accounts ?? {}).length === 0) this.deps.store.write({});
+      this.refusedUntil.delete(origin);
+      await this.relabel();
       await this.applyLetter();
       this.emit();
     });

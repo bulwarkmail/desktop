@@ -107,15 +107,26 @@ export class FolderRoots {
 
   /**
    * A wipe. One account: its folder roots and the engine's records of its roots, the drive's
-   * too (the drive takes its own folder). Everything: all of it, every origin's.
+   * too (the drive takes its own folder). Every account of `owner`: that page's folder roots
+   * and their records, and what this run has going if it's this page. Owner null: all of it,
+   * every origin's.
    */
-  async wipe(account: string | null): Promise<void> {
+  async wipe(account: string | null, owner: string | null): Promise<void> {
     const { registry, grants, disk, store, origin } = this.options;
-    if (account === null) {
+    if (account === null && owner === null) {
       grants.revokeAll();
       for (const id of this.ids()) registry.remove(id);
       await disk.abortWrites();
       await store.removeAll();
+      return;
+    }
+    if (account === null) {
+      if (owner === origin) {
+        grants.revokeAll();
+        for (const id of this.ids()) registry.remove(id);
+        await disk.abortWrites();
+      }
+      await store.removeWhere((stored) => stored.origin === owner);
       return;
     }
     const ofAccount = registry.list().filter((entry) => entry.root.account === account).map((entry) => entry.root.id);

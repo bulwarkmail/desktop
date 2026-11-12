@@ -18,7 +18,6 @@
  * file in it: they were the user's. Only main's own temporary files there go.
  */
 
-import { rmSync } from 'node:fs';
 import { lstat, realpath, statfs } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -36,6 +35,7 @@ import { FolderRoots } from '../files/folder-roots';
 import { FolderRootStore, MAX_STATE_CHARS, validRootId } from '../files/store';
 import { RootWatcher } from '../files/watcher';
 import { isInstalledBuild } from '../installed';
+import { removeOwn } from '../remove-tree';
 import { fill, strings } from '../strings';
 import { takeUserGesture, watchUserGestures } from '../user-gesture';
 import { addWipeStep } from './local-wipe';
@@ -67,13 +67,15 @@ export function folderSyncAllowed(): boolean {
   return effectivePolicyValue(policies.snapshot.FilesFolderSyncEnabled, undefined) !== false;
 }
 
-let running: { wipe: (account: string | null) => Promise<void>; forgetState: (rootId: string) => Promise<void> } | null = null;
+let running: { wipe: (origin: string | null, account: string | null) => Promise<void>; forgetState: (rootId: string) => Promise<void> } | null = null;
 
 // At load, not in setup: a policy's wipe at the start of a launch comes before any feature.
-// The folders and the files in them stay; what the app knew about them goes.
-addWipeStep(async (_session, _partition, _reason, account) => {
-  if (running) await running.wipe(account);
-  else if (account === null) rmSync(filesDataFolder(), { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+// The folders and the files in them stay; what the app knew about them goes. Each folder's
+// record names the page it was added from: a server's wipe takes those of its page.
+addWipeStep(async ({ origin, account }) => {
+  if (running) await running.wipe(origin, account);
+  else if (origin === null && account === null) removeOwn(filesDataFolder());
+  else if (account === null) await new FolderRootStore(filesDataFolder(), makeRootPrivate).removeWhere((stored) => stored.origin === origin);
 }, { perAccount: true });
 
 /** For the drive, when its root goes for good: the engine's record of it goes too. */
@@ -183,9 +185,9 @@ export const filesFoldersFeature: Feature = {
     });
 
     running = {
-      wipe: async (account) => {
+      wipe: async (owner, account) => {
         await loaded;
-        await folders.wipe(account);
+        await folders.wipe(account, owner);
       },
       forgetState: (rootId) => store.removeState(rootId),
     };

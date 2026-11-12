@@ -36,6 +36,23 @@ function digest(proof: Uint8Array): string {
   return createHash('sha256').update(proof).digest('hex');
 }
 
+/** The name an origin's files in the app-lock folder go by. */
+export function appLockSite(origin: string): string {
+  return createHash('sha256').update(origin).digest('hex').slice(0, 16);
+}
+
+/**
+ * Whether a file in the app-lock folder is that site's: the gate's record and the Hello marker
+ * (`<site>.json`, `<site>.hello.json`), and the keys main keeps for it (`<name>-<site>.bin`).
+ */
+export function isSiteFile(name: string, site: string): boolean {
+  return name.startsWith(`${site}.`) || name.endsWith(`-${site}.bin`);
+}
+
+function recordFile(userData: string, origin: string): string {
+  return path.join(userData, 'app-lock', `${appLockSite(origin)}.json`);
+}
+
 function isProof(proof: unknown): proof is Uint8Array {
   return proof instanceof Uint8Array && proof.length === 32;
 }
@@ -52,9 +69,13 @@ export class AppLockGate extends EventEmitter<{ locked: [boolean]; enrolled: [bo
 
   /** Features start in some order, and whichever asks first reads the profile. */
   initForProfile(userData: string, origin: string): void {
-    const site = createHash('sha256').update(origin).digest('hex').slice(0, 16);
-    const file = path.join(userData, 'app-lock', `${site}.json`);
+    const file = recordFile(userData, origin);
     if (this.file !== file) this.init(file);
+  }
+
+  /** Whether this run's lock is that origin's in that profile. */
+  isFor(userData: string, origin: string): boolean {
+    return this.file === recordFile(userData, origin);
   }
 
   /** Reads what's known about this profile. */

@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
@@ -27,6 +27,7 @@ import {
   DRIVE_PROVIDER,
 } from '../src/main/files/drive-places';
 import type { NativeFetchEvent, NativeFilesModule, NativeSyncRoot } from '../src/main/native-loader';
+import { removeFilesDrive } from '../src/main/uninstall-cleanup';
 import { fakeRegistry } from './fake-registry';
 
 /**
@@ -914,6 +915,44 @@ test.describe("another profile's Files drive", () => {
     expect(registered.map((root) => root.id)).toEqual([installed.id]);
     expect(calls.filter((call) => call.includes(installed.id))).toEqual([]);
   });
+
+  test("an uninstall takes every root this profile registered, copies out what wasn't uploaded, and leaves another profile's", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), 'bw-drive-uninstall-'));
+    const documents = mkdtempSync(path.join(tmpdir(), 'bw-drive-documents-'));
+    bases.push(base, documents);
+    const folder = path.join(realpathSync.native(base), 'user@example.org');
+    mkdirSync(folder);
+    writeFileSync(path.join(folder, 'notes.txt'), 'written here, never uploaded');
+    const stray = path.join(realpathSync.native(base), 'gone');
+    mkdirSync(stray);
+    const mine = { id: `${PROVIDER}!${SID}!${rootKey(INSTALLED, 'acct-1')}`, path: folder, displayName: 'Bulwark Files' } as NativeSyncRoot;
+    // Left by a crash: this profile's by its id, no account stored for it.
+    const leftover = { id: `${PROVIDER}!${SID}!${rootKey(INSTALLED, 'acct-gone')}`, path: stray, displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const theirs = { id: `${PROVIDER}!${SID}!${rootKey(OTHER, 'acct-1')}`, path: 'C:\\Users\\someone\\Other Files\\user@example.org', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const { registered, calls, native } = world([mine, leftover, theirs]);
+    const stored: StoredDrive = { accounts: { 'acct-1': { label: 'user@example.org', folder: 'user@example.org', rootId: 'r1', createdAt: 1, key: rootKey(INSTALLED, 'acct-1') } } };
+    await removeFilesDrive(native, { profile: INSTALLED, provider: PROVIDER, base, documents, stored, supported: true, version: '1' });
+    expect(registered.map((root) => root.id)).toEqual([theirs.id]);
+    expect(calls.filter((call) => call.includes(theirs.id) || call.includes(theirs.path!))).toEqual([]);
+    expect(existsSync(folder)).toBe(false);
+    expect(existsSync(stray)).toBe(false);
+    // The base folder goes once it's empty.
+    expect(existsSync(base)).toBe(false);
+    const rescued = readdirSync(documents, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile());
+    expect(rescued.map((entry) => entry.name)).toEqual(['notes.txt']);
+    expect(readFileSync(path.join(rescued[0].parentPath, 'notes.txt'), 'utf8')).toBe('written here, never uploaded');
+  });
+
+  test('an uninstall with no drive ever turned on, or with no helper, does nothing and says nothing', async () => {
+    const base = mkdtempSync(path.join(tmpdir(), 'bw-drive-uninstall-'));
+    bases.push(base);
+    const theirs = installedRoot();
+    const { registered, calls, native } = world([theirs]);
+    await removeFilesDrive(native, { profile: OTHER, provider: PROVIDER, base, documents: base, stored: {}, supported: true, version: '1' });
+    await removeFilesDrive(null, { profile: INSTALLED, provider: PROVIDER, base, documents: base, stored: {}, supported: true, version: '1' });
+    expect(calls).toEqual([]);
+    expect(registered).toEqual([theirs]);
+  });
 });
 
 test.describe('turning the drive on: a click, and then the user\'s yes', () => {
@@ -1121,6 +1160,78 @@ test.describe('turning the drive on: a click, and then the user\'s yes', () => {
       const entry = (name: string) => ({ path: name, kind: 'file' as const, size: 1, mtimeMs: 1, identity: 'i' });
       const placed = await drive.place(on.value.id, ['ok.txt', 'con', 'aux.txt', 'trailing.', 'trailing ', 'note:stream', '../out'].map(entry));
       expect(placed).toEqual({ ok: true, value: [{ path: 'ok.txt' }, { path: 'con', error: 'name' }, { path: 'aux.txt', error: 'name' }, { path: 'trailing.', error: 'name' }, { path: 'trailing ', error: 'name' }, { path: 'note:stream', error: 'name' }, { path: '../out', error: 'outside' }] });
+    } finally {
+      remove();
+    }
+  });
+
+  test("a server's wipe takes the accounts turned on from its page and leaves another page's", async () => {
+    const SERVER = 'https://mail.example.org';
+    const older = (label: string) => ({ label, folder: label, rootId: `r-${label}`, createdAt: 1 });
+    const stored: StoredDrive = {
+      accounts: {
+        // From before accounts named their page: one with this server's yes, one without.
+        'old-acct': older('old@example.org'),
+        'stray-acct': older('stray@example.org'),
+        'other-acct': { ...older('other@example.org'), origin: 'https://other.example' },
+      },
+    };
+    const { drive, base, registered, yes, store, remove } = askingDrive([true], { stored });
+    try {
+      for (const account of ['old-acct', 'stray-acct']) registered.push(`Bulwark Test Unit!S-1-5-21-1!${accountKey(PROFILE, account)}`);
+      registered.push(`Bulwark Test Unit!S-1-5-21-1!${rootKey(PROFILE, 'other-acct')}`);
+      yes.add('old-acct');
+      const on = await drive.enable('acct-1', 'alice@example.org', click);
+      expect(on.ok).toBe(true);
+      expect(store.value.accounts?.['acct-1']?.origin, 'turned on from this page').toBe(SERVER);
+      const folders = () => readdirSync(realpathSync.native(base)).sort();
+      mkdirSync(path.join(base, 'old@example.org'));
+      mkdirSync(path.join(base, 'stray@example.org'));
+      mkdirSync(path.join(base, 'other@example.org'));
+      expect(folders()).toEqual(['alice@example.org', 'old@example.org', 'other@example.org', 'stray@example.org']);
+
+      await drive.wipe(SERVER);
+      expect(Object.keys(store.value.accounts ?? {}).sort()).toEqual(['other-acct', 'stray-acct']);
+      expect(registered.map(keyOfRoot).sort()).toEqual([accountKey(PROFILE, 'stray-acct'), rootKey(PROFILE, 'other-acct')].sort());
+      expect([...yes]).toEqual([]);
+      expect(folders()).toEqual(['other@example.org', 'stray@example.org']);
+
+      // The standalone page's wipe takes the older account with no yes; the other page's stays.
+      await drive.wipe('https://app.bulwark.localhost');
+      expect(Object.keys(store.value.accounts ?? {})).toEqual(['other-acct']);
+      expect(registered.map(keyOfRoot)).toEqual([rootKey(PROFILE, 'other-acct')]);
+      expect(folders()).toEqual(['other@example.org']);
+    } finally {
+      remove();
+    }
+  });
+
+  test('on a profile that only ran one server, an account from before accounts named their page is that server\'s at its wipe, with no yes too', async () => {
+    const SERVER = 'https://mail.example.org';
+    const older = (label: string) => ({ label, folder: label, rootId: `r-${label}`, createdAt: 1 });
+    const stored: StoredDrive = {
+      accounts: {
+        'stray-acct': older('stray@example.org'),
+        'other-acct': { ...older('other@example.org'), origin: 'https://other.example' },
+      },
+    };
+    const { drive, base, registered, store, remove } = askingDrive([true], { stored });
+    try {
+      registered.push(`Bulwark Test Unit!S-1-5-21-1!${accountKey(PROFILE, 'stray-acct')}`);
+      registered.push(`Bulwark Test Unit!S-1-5-21-1!${rootKey(PROFILE, 'other-acct')}`);
+      mkdirSync(path.join(base, 'stray@example.org'));
+      writeFileSync(path.join(base, 'stray@example.org', 'contract.txt'), 'a file of the server, kept on this device');
+      mkdirSync(path.join(base, 'other@example.org'));
+      const folders = () => readdirSync(realpathSync.native(base)).sort();
+
+      // A third page's wipe takes neither, whoever the older records belong to.
+      await drive.wipe('https://third.example', SERVER);
+      expect(Object.keys(store.value.accounts ?? {}).sort()).toEqual(['other-acct', 'stray-acct']);
+
+      await drive.wipe(SERVER, SERVER);
+      expect(Object.keys(store.value.accounts ?? {})).toEqual(['other-acct']);
+      expect(registered.map(keyOfRoot)).toEqual([rootKey(PROFILE, 'other-acct')]);
+      expect(folders()).toEqual(['other@example.org']);
     } finally {
       remove();
     }

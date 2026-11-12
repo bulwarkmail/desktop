@@ -22,15 +22,16 @@
  * storage isn't enough to guess at elsewhere, only someone who can open this user's DPAPI can.
  */
 
-import { createHash, createHmac } from 'node:crypto';
-import { rmSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
+import { readdirSync, rmdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { app, BrowserWindow, powerMonitor, safeStorage, systemPreferences } from 'electron';
 import { CHANNEL, type AppLockStatus, type OsUnlockAnswer, type OsUnlockKind, type PinStepAnswer } from '../../shared/bridge';
-import { appLockGate } from '../app-lock-gate';
-import { AppLockHello, HELLO_SALT_BYTES, helloKeyName, removeAllHelloKeys, type HelloAnswer, type HelloKeys } from '../app-lock-hello';
+import { appLockGate, appLockSite as siteOf, isSiteFile } from '../app-lock-gate';
+import { AppLockHello, HELLO_SALT_BYTES, helloKeyName, removeAllHelloKeys, removeHelloKeyOf, type HelloAnswer, type HelloKeys } from '../app-lock-hello';
 import { fakeHelloKeys } from '../app-lock-hello-fake';
 import { native } from '../native';
+import { removeOwn } from '../remove-tree';
 import { effectivePolicyValue } from '../../shared/policy-schema';
 import { policies } from './policies';
 import { randomSecret, SecretStore } from '../secrets';
@@ -78,13 +79,33 @@ function helloAllowed(): boolean {
 }
 
 // Whatever the mode: a wipe can run before or without the feature's setup. The folder holds the
-// gate's record and the DPAPI-wrapped lock key of every origin, and the wipe takes all origins,
-// and every origin's Hello key credential with them.
-addWipeStep(async () => {
-  const folder = path.join(app.getPath('userData'), 'app-lock');
-  await removeAllHelloKeys(folder, helloKeys());
-  rmSync(folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
-  appLockGate.forget();
+// gate's record, the DPAPI-wrapped lock key, the pepper and the Hello marker of every origin, each
+// named by its site. A server's wipe takes its own and its Hello key credential; the policy's
+// wipe takes every origin's.
+addWipeStep(async ({ origin }) => {
+  const userData = app.getPath('userData');
+  const folder = path.join(userData, 'app-lock');
+  if (origin === null) {
+    await removeAllHelloKeys(folder, helloKeys());
+    removeOwn(folder, { root: userData });
+    appLockGate.forget();
+    return;
+  }
+  const site = siteOf(origin);
+  await removeHelloKeyOf(folder, site, helloKeys());
+  let names: string[] = [];
+  try {
+    names = readdirSync(folder);
+  } catch {
+    // No lock was ever set up here.
+  }
+  for (const name of names.filter((entry) => isSiteFile(entry, site))) rmSync(path.join(folder, name), { force: true });
+  if (appLockGate.isFor(userData, origin)) appLockGate.forget();
+  try {
+    if (readdirSync(folder).length === 0) rmdirSync(folder);
+  } catch {
+    // Gone already, or not empty after all.
+  }
 });
 
 type Verifier = (window: BrowserWindow | null, reason: string) => Promise<'yes' | 'no' | 'unavailable'>;
@@ -114,7 +135,7 @@ const verifyWithOs: Verifier = async (window, reason) => {
 
 function setup(ctx: FeatureContext): void {
   const { windows } = ctx;
-  const site = createHash('sha256').update(ctx.origin).digest('hex').slice(0, 16);
+  const site = siteOf(ctx.origin);
   const folder = path.join(app.getPath('userData'), 'app-lock');
   const secrets = new SecretStore(folder);
   const osKeyName = `${OS_KEY_NAME}-${site}`;
@@ -343,10 +364,11 @@ function setup(ctx: FeatureContext): void {
 
   // The webmail's remote wipe and its wipe from settings run in the page, and end here. The page has
   // asked its own questions by now: a remote wipe has nobody to ask, and settings have asked already.
+  // It takes this server's things only: the page speaks for its own origin and no other.
   ctx.handle(CHANNEL.localWipeRun, async (event, _window, request) => {
     const { reason, account } = (request ?? {}) as { reason?: unknown; account?: unknown };
     if ((reason !== 'remote' && reason !== 'settings') || (account !== null && typeof account !== 'string')) return { failed: ['bad request'] };
-    return { failed: await wipeForPage({ reason, account }, event.sender.session, app.getPath('userData'), ctx.state) };
+    return { failed: await wipeForPage({ reason, account }, event.sender.session, ctx.origin, ctx.state) };
   });
   ctx.handle(CHANNEL.localWipeFinish, (event, _window, options) => finishWipeForPage(event.sender.session, (options as { keepLocalStorage?: unknown } | undefined)?.keepLocalStorage === true));
 
@@ -406,6 +428,7 @@ function setup(ctx: FeatureContext): void {
       helloKeys: () => (testHelloKeys as (HelloKeys & { names?: () => string[] }) | null)?.names?.() ?? [],
       lockScreen: () => powerMonitor.emit('lock-screen'),
       wipe: () => runLocalWipe('remote', app.getPath('userData'), ctx.state),
+      addWipeStep,
     };
   }
 }

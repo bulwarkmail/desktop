@@ -32,7 +32,7 @@ import {
   type DesktopServerPrivacy,
 } from '../../shared/desktop-telemetry';
 import { normalizeStack, type MainErrorMessage } from '../../server/protocol';
-import { CRASH_LIMITS, buildCrashUpload, listCrashFiles, removeAllCrashFiles, sweepCrashFiles, validUploadUrl, type ScrubNames } from '../crash-files';
+import { CRASH_LIMITS, buildCrashUpload, listCrashFiles, noteCrashRun, removeAllCrashFiles, removeCrashFilesOf, sweepCrashFiles, validUploadUrl, type ScrubNames } from '../crash-files';
 import { MainErrorCounter } from '../main-errors';
 import { profilePaths, telemetryOffInEnv } from '../profile';
 import type { StateFile } from '../state';
@@ -109,9 +109,10 @@ export class PrivacyManager extends EventEmitter<PrivacyEvents> {
     this.counter = new MainErrorCounter(app.getVersion());
     this.dropIdWithoutConsent();
     // Crash files can hold mail. A wipe takes them and the ID, also one at start, ahead of
-    // the partition steps and of any feature.
-    policies.on('wipe-offline-data', () => this.wiped());
-    addWipeStep(async () => this.wiped());
+    // the partition steps and of any feature: a server's wipe the files of its runs, the
+    // policy's all of them. The ID is the shell's own, whoever asks.
+    policies.on('wipe-offline-data', () => this.wiped(null));
+    addWipeStep(async ({ origin, legacy }) => this.wiped(origin, legacy));
     if (this.crashReportsOn) this.startCrashReporter();
     else removeAllCrashFiles(this.crashDir);
     sweepCrashFiles(this.crashDir);
@@ -318,8 +319,8 @@ export class PrivacyManager extends EventEmitter<PrivacyEvents> {
     rmSync(path.join(profilePaths(app.getPath('userData')).telemetry, '.telemetry-id'), { force: true });
   }
 
-  private wiped(): void {
-    removeAllCrashFiles(this.crashDir);
+  private wiped(origin: string | null, legacy?: string): void {
+    removeCrashFilesOf(this.crashDir, origin, legacy);
     this.dropId();
   }
 
@@ -446,6 +447,9 @@ export class PrivacyManager extends EventEmitter<PrivacyEvents> {
   setup(ctx: FeatureContext): void {
     this.ctx = ctx;
     this.mode = ctx.mode;
+    // Whose crash files this run writes, for a wipe of that server's. Also with crash reports
+    // off: they can be turned on during the run.
+    noteCrashRun(this.crashDir, ctx.origin);
     ctx.handle(CHANNEL.privacyGet, () => this.view());
     ctx.handle(CHANNEL.privacySetTelemetry, (_event, window, on) => this.setTelemetry(on, window));
     ctx.handle(CHANNEL.privacySetCrashReports, (_event, window, on) => this.setCrashReports(on, window));

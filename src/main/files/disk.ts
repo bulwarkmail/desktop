@@ -21,6 +21,7 @@ import type { BigIntStats } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, realpath, rename, rm, statfs, unlink, utimes, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import type { FilesError, FilesExpect, FilesLocalEntry, FilesResult } from '../../shared/bridge';
+import { removeTree } from '../remove-tree';
 import { comparable, isTempName, joinRelative, splitRelative, TEMP_PREFIX } from './paths';
 import type { RegisteredRoot } from './registry';
 
@@ -366,7 +367,9 @@ export class FilesDisk {
       }
     }
     try {
-      await rm(absolute, { recursive: stats.isDirectory(), force: false, maxRetries: 2, retryDelay: 100 });
+      // A folder never through a link, whatever came in since the walk above (remove-tree.ts).
+      if (stats.isDirectory()) removeTree(absolute, { root: root.dir, tries: 3 });
+      else await rm(absolute, { force: false, maxRetries: 2, retryDelay: 100 });
       return ok('deleted');
     } catch (error) {
       return fail(errorOf(error, this.platform));

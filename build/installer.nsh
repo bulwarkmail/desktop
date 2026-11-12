@@ -286,6 +286,7 @@ bulwarkPoliciesDone:
     !insertmacro bulwarkThemeUninstallerPage
   !endif
   ${ifNot} ${isUpdated}
+    ExecWait '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" --uninstall-cleanup'
     DeleteRegValue HKCU "Software\RegisteredApplications" "Bulwark"
     DeleteRegKey HKCU "Software\Bulwark"
     DeleteRegKey HKCU "Software\Classes\Bulwark.Url.mailto"

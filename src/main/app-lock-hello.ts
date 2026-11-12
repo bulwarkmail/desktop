@@ -88,6 +88,18 @@ export async function removeAllHelloKeys(folder: string, keys: HelloKeys): Promi
   }
 }
 
+/** One origin's key credential, by its marker, and the marker with it. A server's wipe deletes its own only. */
+export async function removeHelloKeyOf(folder: string, site: string, keys: HelloKeys): Promise<void> {
+  const marker = path.join(folder, `${site}${MARKER_SUFFIX}`);
+  try {
+    const { name } = JSON.parse(readFileSync(marker, 'utf8')) as { name?: unknown };
+    if (typeof name === 'string') await keys.delete(name);
+  } catch {
+    // No marker: no key credential. An unreadable one names nothing to delete.
+  }
+  rmSync(marker, { force: true });
+}
+
 export class AppLockHello {
   private readonly marker: string;
 

@@ -125,6 +125,7 @@ function setup(ctx: FeatureContext): void {
   });
   // Nothing of the account is left on the OS's surfaces once it's gone. No page answers then.
   app.on('will-quit', () => hub.clearSurfaces());
+  // What's on them is this run's, so its server's.
   addWipeStep(async () => hub.clearSurfaces());
   setupLogin(hub);
   const power = setupPower(hub);

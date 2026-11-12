@@ -13,11 +13,12 @@
 
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readdirSync, rmSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { readdirSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { app, clipboard, nativeImage, type WebContents } from 'electron';
 import { writeFilesToClipboard } from '../file-clipboard';
+import { removeOwn } from '../remove-tree';
 import { safeDragFileName } from './os-rules';
 import { isInstalledBuild } from '../installed';
 
@@ -110,7 +111,7 @@ function sweep(directory: string): void {
   }
   for (const folder of folders) {
     try {
-      rmSync(path.join(directory, folder), { recursive: true, force: true });
+      removeOwn(path.join(directory, folder), { root: directory, tries: 1 });
     } catch {
       // Held by a program. The next sweep, at the latest the next start.
     }
@@ -124,7 +125,11 @@ export function setupFiles(iconPath: string): FilesHandle {
 
   const removeLater = (folder: string, afterMs: number) => {
     const timer = setTimeout(() => {
-      void rm(folder, { recursive: true, force: true }).catch(() => removeLater(folder, RETRY_LOCKED_MS));
+      try {
+        removeOwn(folder, { root: directory, tries: 1 });
+      } catch {
+        removeLater(folder, RETRY_LOCKED_MS);
+      }
     }, afterMs);
     timer.unref?.();
   };
