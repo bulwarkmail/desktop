@@ -12,6 +12,7 @@ import { addWipeStep } from './local-wipe';
 import { CHANNEL, type ConfirmOptions } from '../../shared/bridge';
 import { dialogWindows } from '../dialog-window';
 import { showDialogSurface } from '../dialog-surfaces';
+import { shownHost } from '../navigation-rules';
 import { strings } from '../strings';
 import { writeFilesToClipboard } from '../file-clipboard';
 import type { Feature } from './index';
@@ -86,7 +87,7 @@ export const dialogsFeature: Feature = {
       // it goes under the text. Standalone, the page is the app's own build: its questions
       // are the app's, and its internal address would only look broken.
       const standalone = ctx.mode === 'standalone';
-      const from = standalone ? strings().windowNames.main : strings().pageQuestionFrom.replaceAll('{caller}', new URL(ctx.origin).host);
+      const from = standalone ? strings().windowNames.main : strings().pageQuestionFrom.replaceAll('{caller}', shownHost(new URL(ctx.origin).host));
       const text = typeof detail === 'string' ? detail.slice(0, MAX_TEXT) : undefined;
       const settings: Electron.MessageBoxOptions = {
         type: type === 'info' || type === 'warning' || type === 'question' ? type : 'question',

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { FilesFetchRequest } from '../src/shared/bridge';
-import { DriveController, type StoredDrive } from '../src/main/files/drive-controller';
+import { DRIVE_NO_HOLD_MS, DRIVE_QUESTIONS_MAX, DriveController, type StoredDrive } from '../src/main/files/drive-controller';
 import { ALIGN, FetchRelay, PIECE } from '../src/main/files/drive-fetch';
 import { helperLetters, settleLetter, type LetterSystem } from '../src/main/files/drive-letter';
 import { isOurLabel, registryLetterLabels, type LetterLabel, type LetterLabelSystem } from '../src/main/files/drive-letter-label';
@@ -14,12 +14,17 @@ import {
   folderNameFor,
   driveBase,
   freeLetters,
+  keyOfRoot,
   letterTarget,
   nativeStatusOf,
+  profileKey,
   relativeParts,
   resolveUnder,
+  rootKey,
   statusClassId,
   wantedLetter,
+  driveProvider,
+  DRIVE_PROVIDER,
 } from '../src/main/files/drive-places';
 import type { NativeFetchEvent, NativeFilesModule, NativeSyncRoot } from '../src/main/native-loader';
 import { fakeRegistry } from './fake-registry';
@@ -378,15 +383,17 @@ test.describe('the icon of a drive from before', () => {
     return { drive, registered, unregistered, remove: () => rmSync(base, { recursive: true, force: true }) };
   }
 
-  const root = (account: string, icon: string | undefined, displayName = 'Bulwark Files'): NativeSyncRoot =>
-    ({ id: `${PROVIDER}!S-1-5-21-1!${accountKey(PROFILE, account)}`, path: `C:\Users\a\Bulwark Files\${account}`, displayName, ...(icon === undefined ? {} : { icon }) }) as NativeSyncRoot;
+  // Ids in the form older versions registered (the account's key alone), which a stored account
+  // names; `fresh` gives one this profile registered with its own key in it.
+  const root = (account: string, icon: string | undefined, displayName = 'Bulwark Files', fresh = false): NativeSyncRoot =>
+    ({ id: `${PROVIDER}!S-1-5-21-1!${fresh ? rootKey(PROFILE, account) : accountKey(PROFILE, account)}`, path: `C:\Users\a\Bulwark Files\${account}`, displayName, ...(icon === undefined ? {} : { icon }) }) as NativeSyncRoot;
   const wish = (label: string, signedOut = false) => ({ label, folder: label, rootId: `r-${label}`, createdAt: 1, ...(signedOut ? { signedOut } : {}) });
 
   test("a start registers a wanted root with another icon again, in place, with this version's", async () => {
     const roots = [
       root('acct-old', 'C:\dev\node_modules\electron\dist\electron.exe,0', 'Bulwark Files - a@example.org'),
       root('acct-same', NEW.toUpperCase(), 'Bulwark Files - b@example.org'),
-      root('acct-gone', 'C:\dev\electron.exe,0'),
+      root('acct-gone', 'C:\dev\electron.exe,0', 'Bulwark Files', true),
       root('acct-out', 'C:\dev\electron.exe,0'),
       // An older helper lists no icon: left as it is.
       root('acct-unknown', undefined),
@@ -663,4 +670,459 @@ test("a test build keeps its drive in its own profile, never in the user's Bulwa
   expect(driveBase({ ...where, chosen: null, testBuild: true })).toBe(path.join(where.profile, 'Bulwark Files'));
   expect(driveBase({ ...where, chosen: null, testBuild: false })).toBe(path.join(where.home, 'Bulwark Files'));
   expect(driveBase({ ...where, chosen: 'C:\\elsewhere', testBuild: true })).toBe('C:\\elsewhere');
+});
+
+test('a test build names its sync roots with a provider of its own, even when a run names none', () => {
+  expect(driveProvider({ chosen: null, testBuild: false })).toBe(DRIVE_PROVIDER);
+  expect(driveProvider({ chosen: null, testBuild: true })).not.toBe(DRIVE_PROVIDER);
+  expect(driveProvider({ chosen: undefined, testBuild: true }).startsWith(`${DRIVE_PROVIDER}!`)).toBe(false);
+  expect(driveProvider({ chosen: 'Bulwark Run 1', testBuild: true })).toBe('Bulwark Run 1');
+});
+
+test.describe("another profile's Files drive", () => {
+  const PROVIDER = 'Bulwark';
+  const SID = 'S-1-5-21-1-2-3-1001';
+  const HOME = path.win32.join('C:', 'Users', 'someone');
+  const INSTALLED = path.win32.join(HOME, 'AppData', 'Roaming', 'Bulwark');
+  const OTHER = path.win32.join(HOME, 'AppData', 'Local', 'Temp', 'other-profile');
+  const INSTALLED_ICON = 'C:\\Program Files\\Bulwark\\resources\\os-icons\\bulwark.ico,0';
+  const TEST_ICON = 'C:\\src\\desktop\\dist\\os-icons\\bulwark.ico,0';
+
+  /** Every sync root of this Windows user, as the helper lists them, and what was done to them. */
+  function world(roots: NativeSyncRoot[] = []) {
+    const registered = [...roots];
+    const calls: string[] = [];
+    const native = {
+      filesDriveRoots: async () => registered.map((root) => ({ ...root })),
+      filesDriveRegister: async (options: { provider: string; account: string; path: string; displayName: string }) => {
+        const id = `${options.provider}!${SID}!${options.account}`;
+        const at = registered.findIndex((root) => root.id === id);
+        const root = { id, path: options.path, displayName: options.displayName } as NativeSyncRoot;
+        if (at === -1) registered.push(root);
+        else registered[at] = root;
+        return id;
+      },
+      filesDriveUnregister: async (id: string) => {
+        calls.push(`unregister ${id}`);
+        const at = registered.findIndex((root) => root.id === id);
+        if (at !== -1) registered.splice(at, 1);
+      },
+      filesDriveConnect: (dir: string) => {
+        calls.push(`connect ${dir}`);
+        return `c-${dir}`;
+      },
+      filesDriveDisconnect: () => {},
+      filesDriveInfo: () => {
+        throw new Error('files:missing');
+      },
+    } as unknown as NativeFilesModule;
+    return { registered, calls, native };
+  }
+
+  /** The installed app's drive, registered by a version that put the account's key alone in the id. */
+  const installedRoot = (): NativeSyncRoot =>
+    ({ id: `${PROVIDER}!${SID}!${accountKey(INSTALLED, 'user@example.org')}`, path: path.win32.join(HOME, 'Bulwark Files', 'user@example.org'), displayName: 'Bulwark Files' }) as NativeSyncRoot;
+
+  const bases: string[] = [];
+  test.afterEach(() => {
+    for (const base of bases.splice(0)) rmSync(base, { recursive: true, force: true });
+  });
+
+  function profileDrive(native: NativeFilesModule, profile: string, options: { stored?: StoredDrive; letters?: LetterSystem; letterLabels?: LetterLabelSystem; policyLetter?: string | null; icon?: string; provider?: string } = {}) {
+    const base = mkdtempSync(path.join(tmpdir(), 'bw-drive-profiles-'));
+    bases.push(base);
+    const store = { value: options.stored ?? ({} as StoredDrive) };
+    const drive = new DriveController({
+      native,
+      supported: true,
+      provider: options.provider ?? PROVIDER,
+      base,
+      profile,
+      icon: options.icon ?? TEST_ICON,
+      version: '0',
+      store: { read: () => store.value, write: (next) => (store.value = next) },
+      policy: () => ({ forcedOff: false, letter: options.policyLetter ?? null }),
+      page: { fetch: () => 'not-running', fetchCancelled: () => {}, stateChanged: () => {} },
+      registry: { add: () => {}, remove: () => {} },
+      letters: options.letters ?? null,
+      letterLabels: options.letterLabels ?? null,
+      warn: () => {},
+      watchPins: false,
+    });
+    return { drive, store, base };
+  }
+
+  test('a start of a second profile neither connects to it nor unregisters it', async () => {
+    const { registered, calls, native } = world([installedRoot()]);
+    await profileDrive(native, OTHER).drive.startUp();
+    expect.soft(calls, "calls on the other profile's sync root").toEqual([]);
+    expect(registered).toEqual([installedRoot()]);
+  });
+
+  test('a wipe in a second profile leaves it registered', async () => {
+    const { registered, native } = world([installedRoot()]);
+    await profileDrive(native, OTHER).drive.wipe();
+    expect(registered).toEqual([installedRoot()]);
+  });
+
+  test('two profiles, the same account on the same server: two sync roots, and neither profile touches the other\'s', async () => {
+    const { registered, calls, native } = world();
+    const first = profileDrive(native, INSTALLED);
+    const second = profileDrive(native, OTHER);
+    expect((await first.drive.enable('acct-1', 'user@example.org', () => true)).ok).toBe(true);
+    expect((await second.drive.enable('acct-1', 'user@example.org', () => true)).ok).toBe(true);
+    expect(registered).toHaveLength(2);
+    expect(registered[0].id).not.toBe(registered[1].id);
+    const firstRoot = registered.find((root) => root.id.endsWith(`!${rootKey(INSTALLED, 'acct-1')}`));
+    expect(firstRoot).toBeTruthy();
+    calls.length = 0;
+    // The second profile's user signs out and the next start finds nothing wanted; then a wipe.
+    await second.drive.disable('acct-1', 'user');
+    await second.drive.startUp();
+    await second.drive.wipe();
+    expect(registered.map((root) => root.id)).toEqual([firstRoot!.id]);
+    expect(calls.filter((call) => call.includes(firstRoot!.id) || call.includes(firstRoot!.path))).toEqual([]);
+    // And the other way round.
+    expect((await second.drive.enable('acct-1', 'user@example.org', () => true)).ok).toBe(true);
+    await first.drive.disable('acct-1', 'user');
+    await first.drive.wipe();
+    expect(registered.map((root) => root.id)).toEqual([`${PROVIDER}!${SID}!${rootKey(OTHER, 'acct-1')}`]);
+  });
+
+  test('a root in the form older versions registered is this profile\'s while its stored accounts name it: kept while wanted, then swept as any other', async () => {
+    const old = { id: `${PROVIDER}!${SID}!${accountKey(INSTALLED, 'acct-1')}`, path: 'C:\\x\\acct-1', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const signedOut = { id: `${PROVIDER}!${SID}!${accountKey(INSTALLED, 'acct-2')}`, path: 'C:\\x\\acct-2', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const { registered, native } = world([old, signedOut]);
+    const stored: StoredDrive = {
+      accounts: {
+        'acct-1': { label: 'a@example.org', folder: 'a@example.org', rootId: 'r1', createdAt: 1 },
+        'acct-2': { label: 'b@example.org', folder: 'b@example.org', rootId: 'r2', createdAt: 1, signedOut: true },
+      },
+    };
+    const { drive } = profileDrive(native, INSTALLED, { stored });
+    await drive.startUp();
+    // Wanted: it stays. Signed out: it goes, as a root of this profile's would.
+    expect(registered.map((root) => root.id)).toEqual([old.id]);
+    // Turned on again: registered in place, under the same id, also at the next start.
+    expect((await drive.enable('acct-1', 'a@example.org', () => false)).ok).toBe(true);
+    expect(registered.map((root) => root.id)).toEqual([old.id]);
+    await drive.startUp();
+    expect(registered.map((root) => root.id)).toEqual([old.id]);
+    await drive.disable('acct-1', 'user');
+    expect(registered).toEqual([]);
+  });
+
+  test('a root in the older form that no stored account names is nobody\'s this profile knows: a start and a wipe leave it', async () => {
+    const stray = { id: `${PROVIDER}!${SID}!${accountKey(INSTALLED, 'acct-gone')}`, path: 'C:\\x\\gone', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const { registered, calls, native } = world([stray]);
+    const { drive } = profileDrive(native, INSTALLED, { stored: { accounts: { 'acct-1': { label: 'a@example.org', folder: 'a@example.org', rootId: 'r1', createdAt: 1 } } } });
+    await drive.startUp();
+    await drive.wipe();
+    expect(calls).toEqual([]);
+    expect(registered).toEqual([stray]);
+  });
+
+  test("the drive letter another profile's drive is on keeps its name, and its mapping, whichever letter this profile wants", async () => {
+    const theirs = { label: 'Bulwark Files', icon: INSTALLED_ICON };
+    const map = new Map([['Q', path.win32.join(HOME, 'Bulwark Files', 'user@example.org')]]);
+    const events: string[] = [];
+    const labels = new Map<string, LetterLabel>([['Q', theirs]]);
+    const letters: LetterSystem = {
+      list: async () => new Map(map),
+      add: async (letter, target) => {
+        events.push(`subst ${letter}`);
+        map.set(letter, target);
+        return true;
+      },
+      remove: async (letter) => {
+        events.push(`unsubst ${letter}`);
+        return map.delete(letter);
+      },
+      usedMask: () => [...map.keys()].reduce((mask, letter) => mask | (1 << (letter.charCodeAt(0) - 65)), 0),
+    };
+    const letterLabels: LetterLabelSystem = {
+      read: async (letter) => labels.get(letter) ?? { label: null, icon: null },
+      write: async (letter, wanted) => {
+        events.push(`name ${letter}`);
+        labels.set(letter, { ...wanted });
+        return true;
+      },
+      remove: async (letter) => {
+        events.push(`unname ${letter}`);
+        labels.delete(letter);
+      },
+      changed: () => {},
+    };
+    const { native } = world([installedRoot()]);
+    // The policy names the same letter for every profile, and this one chose it too.
+    const { drive } = profileDrive(native, OTHER, { stored: { letter: 'Q' }, letters, letterLabels, policyLetter: 'Q' });
+    await drive.startUp();
+    expect((await drive.enable('acct-1', 'other@example.org', () => true)).ok).toBe(true);
+    await drive.disable('acct-1', 'user');
+    await drive.wipe();
+    expect(labels.get('Q')).toEqual(theirs);
+    expect(map.get('Q')).toBe(path.win32.join(HOME, 'Bulwark Files', 'user@example.org'));
+    expect(events.filter((event) => event.endsWith(' Q'))).toEqual([]);
+  });
+
+  test('the account part of an id is two hex runs and a dash, whatever the account is called', () => {
+    for (const account of ['a-b', 'a!b', `${profileKey(INSTALLED)}-${accountKey(INSTALLED, 'x')}`, 'Bulwark!S-1-5!x', '', 'ä'.repeat(200), '../..', 'a\0b']) {
+      expect(rootKey(OTHER, account)).toMatch(/^[0-9a-f]{16}-[0-9a-f]{24}$/);
+      expect(rootKey(OTHER, account).startsWith(`${profileKey(OTHER)}-`)).toBe(true);
+      expect(rootKey(OTHER, account).startsWith(`${profileKey(INSTALLED)}-`)).toBe(false);
+    }
+    // Two accounts whose names differ only around a dash don't share an id.
+    expect(rootKey(OTHER, 'a-b')).not.toBe(rootKey(OTHER, 'a'));
+    expect(rootKey(OTHER, 'a-b')).not.toBe(rootKey(OTHER, 'b'));
+  });
+
+  test("an account named after another profile's root id gets an id of its own, and turning it off leaves the other root", async () => {
+    const installedNew = { id: `${PROVIDER}!${SID}!${rootKey(INSTALLED, 'user@example.org')}`, path: 'C:\\Users\\someone\\Bulwark Files\\user@example.org', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const installedOld = { id: `${PROVIDER}!${SID}!${accountKey(INSTALLED, 'user@example.org')}`, path: 'C:\\Users\\someone\\Bulwark Files\\old', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const { registered, calls, native } = world([installedNew, installedOld]);
+    const { drive } = profileDrive(native, OTHER);
+    // The page of the second profile names its accounts after the other profile's ids.
+    for (const account of [keyOfRoot(installedNew.id), keyOfRoot(installedOld.id), installedNew.id, installedOld.id]) {
+      expect((await drive.enable(account, 'x@example.org', () => true)).ok).toBe(true);
+      await drive.disable(account, 'user');
+    }
+    await drive.startUp();
+    await drive.wipe();
+    expect(registered).toEqual([installedNew, installedOld]);
+    expect(calls.filter((call) => call.includes(installedNew.id) || call.includes(installedOld.id))).toEqual([]);
+  });
+
+  test('two profiles from before, the same account, both with ids in the older form: a start and a wipe of one leave the other', async () => {
+    const a = { id: `${PROVIDER}!${SID}!${accountKey(INSTALLED, 'acct-1')}`, path: 'C:\\a\\acct-1', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const b = { id: `${PROVIDER}!${SID}!${accountKey(OTHER, 'acct-1')}`, path: 'C:\\b\\acct-1', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const { registered, native } = world([a, b]);
+    const second = profileDrive(native, OTHER, { stored: { accounts: { 'acct-1': { label: 'a@example.org', folder: 'a@example.org', rootId: 'r1', createdAt: 1 } } } });
+    await second.drive.startUp();
+    expect(registered.map((root) => root.id)).toEqual([a.id, b.id]);
+    await second.drive.wipe();
+    expect(registered.map((root) => root.id)).toEqual([a.id]);
+  });
+
+  test("a provider whose name starts like the installed app's lists none of its roots", async () => {
+    const installed = { id: `${PROVIDER}!${SID}!${accountKey(INSTALLED, 'user@example.org')}`, path: 'C:\\x', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const other = { id: `Bulwark Test!${SID}!${rootKey(INSTALLED, 'user@example.org')}`, path: 'C:\\y', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const { registered, calls, native } = world([installed, other]);
+    // The same profile path under the test provider: only the test provider's root is its own.
+    const { drive } = profileDrive(native, INSTALLED, { provider: 'Bulwark Test' });
+    await drive.startUp();
+    await drive.wipe();
+    expect(registered.map((root) => root.id)).toEqual([installed.id]);
+    expect(calls.filter((call) => call.includes(installed.id))).toEqual([]);
+  });
+});
+
+test.describe('turning the drive on: a click, and then the user\'s yes', () => {
+  const PROFILE = 'C:\\profile';
+
+  /** A drive over a fake helper, with the question answered from `answers` (true is yes) and counted. */
+  function askingDrive(answers: boolean[], options: { stored?: StoredDrive; now?: () => number } = {}) {
+    const base = mkdtempSync(path.join(tmpdir(), 'bw-drive-ask-'));
+    const registered: string[] = [];
+    const native = {
+      filesDriveRoots: async () => registered.map((id) => ({ id, path: base, displayName: 'Bulwark Files' })),
+      filesDriveRegister: async (o: { provider: string; account: string }) => {
+        const id = `${o.provider}!S-1-5-21-1!${o.account}`;
+        if (!registered.includes(id)) registered.push(id);
+        return id;
+      },
+      filesDriveUnregister: async (id: string) => {
+        registered.splice(registered.indexOf(id), 1);
+      },
+      filesDriveConnect: () => 'c1',
+      filesDriveDisconnect: () => {},
+      filesDrivePlace: (_dir: string, batch: unknown[]) => batch.map(() => ''),
+      filesDriveInfo: () => {
+        throw new Error('files:missing');
+      },
+    } as unknown as NativeFilesModule;
+    const yes = new Set<string>();
+    const asked: { account: string; label: string; folder: string }[] = [];
+    const letters: LetterSystem = { list: async () => new Map(), add: async () => true, remove: async () => true, usedMask: () => 0 };
+    const store = { value: options.stored ?? ({} as StoredDrive) };
+    const drive = new DriveController({
+      native,
+      supported: true,
+      provider: 'Bulwark Test Unit',
+      base,
+      profile: PROFILE,
+      icon: 'x.ico,0',
+      version: '1',
+      store: { read: () => store.value, write: (next) => (store.value = next) },
+      policy: () => ({ forcedOff: false, letter: null }),
+      page: { fetch: () => true, fetchCancelled: () => {}, stateChanged: () => {} },
+      registry: { add: () => {}, remove: () => {} },
+      letters,
+      warn: () => {},
+      watchPins: false,
+      ...(options.now ? { now: options.now } : {}),
+      consent: {
+        origin: 'https://mail.example.org',
+        has: (account) => (account === undefined ? yes.size > 0 : yes.has(account)),
+        add: (account) => yes.add(account),
+        remove: (account) => yes.delete(account),
+        clear: () => yes.clear(),
+        ask: async (account, label, folder) => {
+          asked.push({ account, label, folder });
+          return answers.shift() ?? false;
+        },
+      },
+    });
+    return { drive, base, registered, asked, yes, store, remove: () => rmSync(base, { recursive: true, force: true }) };
+  }
+
+  test('after a no, the page can not put the question up again by naming another account', async () => {
+    let now = 1_000_000;
+    const { drive, asked, remove } = askingDrive([false, false, false, false, false, false], { now: () => now });
+    try {
+      expect(await drive.enable('acct-1', 'alice@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      // The account is the page's word. Five more clicks, a new name each time.
+      for (let n = 2; n <= 6; n += 1) expect(await drive.enable(`acct-${n}`, 'alice@example.org', click), `acct-${n}`).toEqual({ ok: false, error: 'cancelled' });
+      expect(asked.map((question) => question.account), 'questions inside the hold time of the first no').toEqual(['acct-1']);
+      // Once the no has run out, the server may ask again.
+      now += DRIVE_NO_HOLD_MS + 1;
+      await drive.enable('acct-7', 'alice@example.org', click);
+      expect(asked).toHaveLength(2);
+    } finally {
+      remove();
+    }
+  });
+
+  test('one server puts the question up three times at most while the app runs, yes or no', async () => {
+    let now = 1_000_000;
+    const { drive, asked, remove } = askingDrive([true, true, false, true], { now: () => now });
+    try {
+      expect((await drive.enable('acct-1', 'a@example.org', click)).ok).toBe(true);
+      expect((await drive.enable('acct-2', 'b@example.org', click)).ok).toBe(true);
+      expect(await drive.enable('acct-3', 'c@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      now += DRIVE_NO_HOLD_MS + 1;
+      expect(await drive.enable('acct-4', 'd@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      expect(asked).toHaveLength(DRIVE_QUESTIONS_MAX);
+      // The accounts that got a yes still come back with no question.
+      expect((await drive.enable('acct-1', 'a@example.org', () => false)).ok).toBe(true);
+    } finally {
+      remove();
+    }
+  });
+
+  const click = () => true;
+  const noClick = () => false;
+
+  test('no click: refused before anything is asked; a click: the question names the folder, and a no makes nothing', async () => {
+    const { drive, base, registered, asked, remove } = askingDrive([false]);
+    try {
+      expect(await drive.enable('acct-1', 'alice@example.org', noClick)).toEqual({ ok: false, error: 'gesture' });
+      expect(asked).toEqual([]);
+      expect(await drive.enable('acct-1', 'alice@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      expect(asked).toEqual([{ account: 'acct-1', label: 'alice@example.org', folder: path.win32.join(realpathSync.native(base), 'alice@example.org') }]);
+      expect(registered).toEqual([]);
+      expect(drive.state().wanted).toEqual([]);
+    } finally {
+      remove();
+    }
+  });
+
+  test('after a no, five more clicks ask nothing until the no has run out; then a yes turns it on', async () => {
+    let now = 1_000_000;
+    const { drive, registered, asked, remove } = askingDrive([false, true], { now: () => now });
+    try {
+      await drive.enable('acct-1', 'alice@example.org', click);
+      for (let call = 0; call < 5; call += 1) expect(await drive.enable('acct-1', 'alice@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      expect(asked).toHaveLength(1);
+      now += DRIVE_NO_HOLD_MS + 1;
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      expect(asked).toHaveLength(2);
+      expect(registered).toHaveLength(1);
+    } finally {
+      remove();
+    }
+  });
+
+  test('a second account of the same server is asked for again: its folder is another', async () => {
+    const { drive, asked, remove } = askingDrive([true, false]);
+    try {
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      expect(await drive.enable('acct-2', 'bob@example.org', click)).toEqual({ ok: false, error: 'cancelled' });
+      expect(asked.map((question) => path.win32.basename(question.folder))).toEqual(['alice@example.org', 'bob@example.org']);
+    } finally {
+      remove();
+    }
+  });
+
+  test('a label with path characters, a turned-round mark or 300 characters is cleaned before the question shows it', async () => {
+    // Each says yes: a no would hold the question back for the next account.
+    const { drive, base, asked, remove } = askingDrive([true, true, true]);
+    try {
+      await drive.enable('acct-1', '..\\..\\Windows\\System32', click);
+      await drive.enable('acct-2', 'x'.repeat(300), click);
+      await drive.enable('acct-3', 'Invoices\u202Efdp.exe', click);
+      const real = realpathSync.native(base);
+      for (const { folder } of asked) expect(path.win32.dirname(folder), folder).toBe(real);
+      expect(asked.map((question) => path.win32.basename(question.folder))).toEqual(['.._.._Windows_System32', 'x'.repeat(120), 'Invoicesfdp.exe']);
+      // A label longer than the drive takes is refused before anything is asked.
+      expect(await drive.enable('acct-4', 'x'.repeat(321), click)).toEqual({ ok: false, error: 'failed' });
+      expect(asked).toHaveLength(3);
+    } finally {
+      remove();
+    }
+  });
+
+  test('the yes stays through a sign-out, so a sign-in brings the drive back with no click; turned off by the user, it asks again', async () => {
+    const { drive, asked, remove } = askingDrive([true, true]);
+    try {
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      await drive.disable('acct-1', 'signed-out');
+      expect((await drive.enable('acct-1', 'alice@example.org', noClick)).ok).toBe(true);
+      expect(asked).toHaveLength(1);
+      await drive.disable('acct-1', 'user');
+      expect(await drive.enable('acct-1', 'alice@example.org', noClick)).toEqual({ ok: false, error: 'gesture' });
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      expect(asked).toHaveLength(2);
+    } finally {
+      remove();
+    }
+  });
+
+  test('a wish stored with no yes for this server takes the click and the question too', async () => {
+    const stored: StoredDrive = { accounts: { 'acct-1': { label: 'alice@example.org', folder: 'alice@example.org', rootId: 'r1', createdAt: 1 } } };
+    const { drive, asked, remove } = askingDrive([true], { stored });
+    try {
+      expect(await drive.enable('acct-1', 'alice@example.org', noClick)).toEqual({ ok: false, error: 'gesture' });
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      expect(asked).toHaveLength(1);
+    } finally {
+      remove();
+    }
+  });
+
+  test('a drive letter only for a server with a yes, and a wipe takes every yes', async () => {
+    const { drive, yes, remove } = askingDrive([true]);
+    try {
+      expect(await drive.setLetter('Q', click)).toEqual({ ok: false, error: 'gesture' });
+      expect((await drive.enable('acct-1', 'alice@example.org', click)).ok).toBe(true);
+      expect((await drive.setLetter('Q', click)).ok).toBe(true);
+      await drive.wipe();
+      expect(yes.size).toBe(0);
+      expect(await drive.setLetter('R', click)).toEqual({ ok: false, error: 'gesture' });
+    } finally {
+      remove();
+    }
+  });
+
+  test('placing takes names through the same check as every other path: no device name, no trailing dot or space', async () => {
+    const { drive, remove } = askingDrive([true]);
+    try {
+      const on = await drive.enable('acct-1', 'alice@example.org', click);
+      if (!on.ok) throw new Error(on.error);
+      const entry = (name: string) => ({ path: name, kind: 'file' as const, size: 1, mtimeMs: 1, identity: 'i' });
+      const placed = await drive.place(on.value.id, ['ok.txt', 'con', 'aux.txt', 'trailing.', 'trailing ', 'note:stream', '../out'].map(entry));
+      expect(placed).toEqual({ ok: true, value: [{ path: 'ok.txt' }, { path: 'con', error: 'name' }, { path: 'aux.txt', error: 'name' }, { path: 'trailing.', error: 'name' }, { path: 'trailing ', error: 'name' }, { path: 'note:stream', error: 'name' }, { path: '../out', error: 'outside' }] });
+    } finally {
+      remove();
+    }
+  });
 });

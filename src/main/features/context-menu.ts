@@ -24,7 +24,7 @@ import { escapeMenuLabel, linkOffersOpen, pickSpellLanguages, safeImageName, spe
 import { openExternally } from '../navigation';
 import { missingDictionaries, onDictionaryMissing, openDictionaryDownloads, outsideHostsAllowed } from '../spellcheck';
 import { setUiLanguage, strings } from '../strings';
-import { noteUserGesture } from '../user-gesture';
+import { noteUserGesture, watchUserGestures } from '../user-gesture';
 import { clientAuth } from './client-certificates';
 import type { Feature } from './index';
 
@@ -145,16 +145,22 @@ export const contextMenuFeature: Feature = {
     const pendingImages = new Set<string>();
     guardImageDownload(session, pendingImages);
 
-    /** The page's link path where it has one: an older instance has none. */
+    /**
+     * The page's link path where it has one: an older instance has none. Open Link was picked in
+     * a menu the OS drew, which is the user's click, for the page's own call that follows too.
+     */
     const openLink = (window: BrowserWindow, url: string, text: string) => {
       if (menu.commandState(window)?.['link.check'] === true) {
+        noteUserGesture(window.webContents);
         window.webContents.send(CHANNEL.menuCommand, `link.open:${JSON.stringify({ url, text })}`);
       } else {
-        openExternally(url);
+        openExternally(url, 'user');
       }
     };
 
     windows.on('created', ({ window }) => {
+      // A line of the page's own menu bar runs only on input main saw (`menu.runBarItem`).
+      watchUserGestures(window.webContents);
       window.webContents.on('context-menu', (_event, params) => {
         const template = contextTemplate(window.webContents, {
           params,
@@ -183,6 +189,7 @@ export const contextMenuFeature: Feature = {
         return;
       }
       let picked: string | null = null;
+      // A pick in a menu the OS drew: no script can make one, so it counts as the user's.
       const template = toMenuTemplate(items, (id) => {
         picked = id;
         noteUserGesture(window.webContents);

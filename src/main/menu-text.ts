@@ -81,9 +81,38 @@ export interface BarSourceItem {
 }
 
 /**
+ * The roles the bar a page draws may run: each works on the page's own content (its selection,
+ * its editing history) or on the window, and brings nothing into the page. Cut and Copy put the
+ * page's own selection on the clipboard, which a page can do itself at the same click or key.
+ */
+const PAGE_BAR_ROLES = new Set(['undo', 'redo', 'cut', 'copy', 'selectall', 'togglefullscreen', 'close', 'quit', 'about']);
+
+/**
+ * Whether the bar a page draws may run a line. Which line was picked there is the page's
+ * word. A role does what Electron says it does, so only the roles known to hand the page
+ * nothing are the page's to run. Any other, Paste first of all (the clipboard's content
+ * arrives in the page) and any role this list doesn't know yet, is left to the menus the OS
+ * draws, where only the user can pick, and to the keys. A line with no role is the app's own
+ * (`MenuSection` in menu.ts says what such a line may do).
+ */
+export function pageBarMayRun(item: { role?: string | null }): boolean {
+  const role = (item.role ?? '').toLowerCase();
+  return role === '' || PAGE_BAR_ROLES.has(role);
+}
+
+/** Whether a menu has a line only the OS's own menu may run (`pageBarMayRun`), submenus included. */
+export function holdsOsMenuLine(items: readonly BarSourceItem[]): boolean {
+  return items.some((item) => {
+    if (item.visible === false || item.type === 'separator') return false;
+    return item.submenu ? holdsOsMenuLine(item.submenu.items) : !pageBarMayRun(item);
+  });
+}
+
+/**
  * A menu as the page draws it in a window with no native bar. Each line's key is its place,
  * and a pick sends that and its text back, so a menu built anew in between can't run
- * something else (`findBarItem`).
+ * something else (`findBarItem`). A line the page's bar may not run (`pageBarMayRun`) goes
+ * out greyed, with its key next to it.
  */
 export function barItemsOf(items: readonly BarSourceItem[], prefix: string): MenuBarItem[] {
   const lines: MenuBarItem[] = [];
@@ -107,7 +136,7 @@ export function barItemsOf(items: readonly BarSourceItem[], prefix: string): Men
       ...(id ? { id } : {}),
       label: text,
       type: sub ? 'submenu' : item.type === 'checkbox' || item.type === 'radio' ? item.type : 'normal',
-      enabled: item.enabled !== false,
+      enabled: item.enabled !== false && (!!sub || pageBarMayRun(item)),
       ...(item.type === 'checkbox' || item.type === 'radio' ? { checked: item.checked === true } : {}),
       ...(accelerator && !sub ? { accelerator } : {}),
       ...(sub ? { items: barItemsOf(sub, key) } : {}),
@@ -125,10 +154,14 @@ export function barItemsOf(items: readonly BarSourceItem[], prefix: string): Men
   return lines;
 }
 
-/** The item a key names, if it still has the text it had when the page drew it. */
+/**
+ * The item a key names, if it still has the text it had when the page drew it. A key is
+ * read only as `barItemsOf` writes it, so a line has one key and no other spelling of it.
+ */
 export function findBarItem<T extends BarSourceItem>(menus: readonly T[], key: string, label: string): T | null {
-  const path = key.split('/').map((part) => Number(part));
-  if (path.some((n) => !Number.isInteger(n) || n < 0)) return null;
+  const parts = key.split('/');
+  if (!parts.every((part) => /^(0|[1-9]\d{0,8})$/.test(part))) return null;
+  const path = parts.map((part) => Number(part));
   let list: readonly T[] = menus;
   let found: T | undefined;
   for (const index of path) {

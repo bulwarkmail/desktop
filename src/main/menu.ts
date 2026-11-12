@@ -14,14 +14,17 @@
  * In a window with an integrated title bar on Windows and Linux there's no native bar:
  * the page draws these same menus as a row at the top when Alt is pressed, or always
  * with "Always show the menu bar" (`barMenus`, `runBarItem`). Its controls shrink to
- * that row while it's there, as in a native window with a menu bar.
+ * that row while it's there, as in a native window with a menu bar. A line that hands the
+ * page what's on the clipboard is not the page's to run (`pageBarMayRun`): its menu opens
+ * only as the OS's own, on the user's Alt and its letter (`showBar`), never when the page
+ * asks for it.
  */
 
 import { app, BrowserWindow, Menu, shell, type MenuItem, type MenuItemConstructorOptions } from 'electron';
-import { CHANNEL, type MenuBarEntry, type MenuBarEvent, type MenuBarMenu, type MenuBarReport, type MenuState } from '../shared/bridge';
-import { assignMnemonics, barItemsOf, enabledWhileLocked, findBarItem, tidySeparators, windowMenuNames, type BarSourceItem } from './menu-text';
+import { CHANNEL, type MenuBarEntry, type MenuBarEvent, type MenuBarItem, type MenuBarMenu, type MenuBarReport, type MenuState } from '../shared/bridge';
+import { assignMnemonics, barItemsOf, enabledWhileLocked, findBarItem, holdsOsMenuLine, pageBarMayRun, tidySeparators, windowMenuNames, type BarSourceItem } from './menu-text';
 import { strings } from './strings';
-import { noteUserGesture } from './user-gesture';
+import { noteUserGesture, takePick } from './user-gesture';
 import type { WindowManager } from './windows';
 
 export interface MenuHooks {
@@ -39,7 +42,13 @@ export interface MenuHooks {
   open?: (window: BrowserWindow) => void;
 }
 
-/** Features add their own lines, such as "Restart to update". */
+/**
+ * Features add their own lines, such as "Restart to update". The bar a page draws runs a line
+ * on the page's word, at any click or key of the user's (`runBarItem`), so what a line's
+ * `click` does has to be safe at any of them: it hands the page nothing from outside the app,
+ * and changes nothing outside the app without a question of the OS's or the shell's in
+ * between. A line with a `role` runs from that bar only if `pageBarMayRun` knows the role.
+ */
 /** `new` sits right under New message in File, with no line of its own. */
 export type MenuSection = 'new' | 'file' | 'view' | 'help' | 'app';
 type Extension = () => MenuItemConstructorOptions[];
@@ -281,8 +290,10 @@ export class MenuController {
       window.webContents.send(CHANNEL.menuCommand, id);
       return;
     }
-    // A file picker opens only on a user action, and a menu pick isn't one the page sees.
-    noteUserGesture(window.webContents);
+    // A file picker opens only on a user action, and a native menu's pick isn't one the page
+    // sees. A line of the page's own bar runs only right after a click or key main saw in the
+    // window (runBarItem), and that input noted its gesture already: nothing more is noted.
+    if (!this.runningBarPick) noteUserGesture(window.webContents);
     void window.webContents.executeJavaScript('0', true).catch(() => {}).finally(() => {
       if (!window.isDestroyed()) window.webContents.send(CHANNEL.menuCommand, id);
     });
@@ -715,19 +726,52 @@ export class MenuController {
     return this.barItems.map(({ entry }) => entry);
   }
 
+  /**
+   * A menu of the bar as the OS draws it, where the page says its name is (CSS pixels). A menu
+   * with a line the page's bar may not run (`holdsOsMenuLine`) never opens here, whatever input
+   * came before the call: the page would pick the moment it comes up, and with it what the
+   * user's next key or click lands on. Main opens that menu itself, on Alt and its letter
+   * (`openOwnMenu`). The call has no answer, whether the menu opened or not.
+   */
   popupBarMenu(window: BrowserWindow, id: string, x: number, y: number): void {
     const found = this.barItems.find(({ entry }) => entry.id === id);
-    if (!found?.item.submenu) return;
+    if (!found?.item.submenu || holdsOsMenuLine(found.item.submenu.items as unknown as BarSourceItem[])) return;
     const scale = window.webContents.getZoomFactor();
-    found.item.submenu.popup({
+    this.popupOsMenu(window, found.item.submenu, { x: Math.round(x * scale), y: Math.round(y * scale) });
+  }
+
+  private popupOsMenu(window: BrowserWindow, menu: Menu, place: { x: number; y: number }): void {
+    menu.popup({
       window,
-      x: Math.round(x * scale),
-      y: Math.round(y * scale),
+      ...place,
       // A bar that hides behind Alt goes when its menu does.
       callback: () => {
         if (!window.isDestroyed()) this.showBar(window, { visible: false });
       },
     });
+  }
+
+  /**
+   * Alt and the letter of a menu with a line only the OS's menu may run, as main read the keys
+   * (window-input.ts, from `before-input-event`, which no script in the page reaches). Main
+   * opens that menu as the OS's own right then, where it chooses (`ownPlaceFor`), and doesn't
+   * ask the page's bar to open it. Whether it did.
+   */
+  private openOwnMenu(window: BrowserWindow, id: string): boolean {
+    const found = this.barItems.find(({ entry }) => entry.id === id);
+    if (!found?.item.submenu || !holdsOsMenuLine(found.item.submenu.items as unknown as BarSourceItem[])) return false;
+    this.popupOsMenu(window, found.item.submenu, this.ownPlaceFor(window));
+    return true;
+  }
+
+  /**
+   * Where main opens a menu of its own accord, in the window's pixels: at the window's left
+   * edge, from the bottom of its top row (the page's bar as reported, never more than the
+   * title bar's height times the zoom). The page has no say in the place, and none in the
+   * moment: that is the user's key. The pointer can be anywhere, over one of its lines too.
+   */
+  private ownPlaceFor(window: BrowserWindow): { x: number; y: number } {
+    return { x: 0, y: this.windows?.overlayHeightOf(window) ?? 0 };
   }
 
   /** Windows whose bar has the keys: Alt was pressed there. */
@@ -744,7 +788,13 @@ export class MenuController {
     return this.barReporting.has(window);
   }
 
+  /**
+   * Main's own word to the page's bar: Alt, Alt and a menu's letter, Escape, the focus gone.
+   * Alt and the letter of a menu only the OS's menu may open doesn't go to the page: main
+   * opens that menu itself (`openOwnMenu`).
+   */
   showBar(window: BrowserWindow, event: MenuBarEvent): void {
+    if (event.visible && event.open && this.openOwnMenu(window, event.open)) return;
     if (event.visible) this.barShown.add(window);
     else this.barShown.delete(window);
     window.webContents.send(CHANNEL.menuBarEvent, { ...event, pinned: this.barPinned() });
@@ -779,14 +829,49 @@ export class MenuController {
     return Menu.getApplicationMenu()?.items.indexOf(item) ?? -1;
   }
 
-  /** A line of the page's bar was picked: the same item the native menu has, clicked in that window. */
+  /** Set while a line of the page's bar runs, for `dispatch`. */
+  private runningBarPick = false;
+
+  /**
+   * A line of the page's bar was picked: the same item the native menu has, clicked in that
+   * window. Which line is the page's word, so main holds it to the click or key that reached
+   * the window a moment ago, as main saw it, and notes no gesture of its own. One click or key
+   * runs one line. A letter runs only the line it's the underlined letter of. A line whose role
+   * is not known to be the page's to run, Paste first of all, never runs from here, whatever
+   * the page says about where it drew it (`pageBarMayRun`): it's in the menu the OS draws, and
+   * on its keys.
+   */
   runBarItem(window: BrowserWindow, key: unknown, label: unknown): void {
     const menu = Menu.getApplicationMenu();
     if (!menu || typeof key !== 'string' || typeof label !== 'string' || window.isDestroyed()) return;
     const item = findBarItem(menu.items as unknown as (BarSourceItem & MenuItem)[], key, label);
-    if (!item || !item.enabled) return;
-    noteUserGesture(window.webContents);
-    item.click(undefined, window, window.webContents);
+    if (!item || !item.enabled || !pageBarMayRun(item)) return;
+    const pick = takePick(window.webContents);
+    if (!pick) return;
+    if (pick.kind === 'letter' && this.barLetterOf(key) !== pick.letter) return;
+    this.runningBarPick = true;
+    try {
+      item.click(undefined, window, window.webContents);
+    } finally {
+      this.runningBarPick = false;
+    }
+  }
+
+  /** The underlined letter of a line of the page's bar, lower case, as `barMenus` gives it. */
+  private barLetterOf(key: string): string | null {
+    const find = (lines: MenuBarItem[]): MenuBarItem | null => {
+      for (const line of lines) {
+        if (line.key === key) return line;
+        const inner = line.items ? find(line.items) : null;
+        if (inner) return inner;
+      }
+      return null;
+    };
+    for (const { item } of this.barItems) {
+      const line = find(barItemsOf((item.submenu?.items ?? []) as unknown as BarSourceItem[], String(this.topIndex(item))));
+      if (line) return line.mnemonic === undefined ? null : (line.label[line.mnemonic] ?? '').toLowerCase() || null;
+    }
+    return null;
   }
 
   /** The page's bar took this much room, or none, and has the keys or not. */

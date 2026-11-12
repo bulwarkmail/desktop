@@ -6,6 +6,8 @@
 
 import { app } from 'electron';
 import { LABEL_KEY, labelKeepsPlaceholders } from './label-keys';
+// Every question that names a server shows it through this, so the end that says whose it is stays in view.
+import { shownHost } from './navigation-rules';
 
 const en = {
   unsavedTitle: 'A draft could not be saved',
@@ -104,7 +106,7 @@ const en = {
   crashAskTitle: 'Send crash reports?',
   crashAskDetail: "Errors in the app are sent with a random ID, file names from the app's own code and short, cleaned-up messages. If the app itself crashes, a crash file stays on this computer. It's a copy of part of the app's memory, so it can contain the text of your mail. A crash file only leaves when you send it. You can turn this off at any time, and that deletes the crash files.",
   crashAskYes: 'Send crash reports',
-  crashSendTitle: (host: string) => `Send this crash report to ${host}?`,
+  crashSendTitle: (host: string) => `Send this crash report to ${shownHost(host)}?`,
   crashSendDetail: "A crash report is a copy of part of the app's memory when it crashed. Bulwark removes user names, server names, addresses and sign-in tokens it can find, but a crash report can still contain the text of your mail. Only send it to someone you trust.",
   crashSendYes: 'Send',
   allow: 'Allow',
@@ -112,18 +114,18 @@ const en = {
   install: 'Install',
   serverHttpTitle: 'Connect without encryption?',
   serverHttpDetail: (host: string) =>
-    `${host} uses plain http. Your password and your mail travel over the network unencrypted, and anyone on that network can read them. Only allow this for a server you run yourself on a network you trust.`,
+    `${shownHost(host)} uses plain http. Your password and your mail travel over the network unencrypted, and anyone on that network can read them. Only allow this for a server you run yourself on a network you trust.`,
   serverLanTitle: 'Connect to a server on your local network?',
   serverLanDetail: (host: string) =>
-    `${host} is on a private network. Bulwark only connects to private addresses that you allow. Allow this if you know this server.`,
+    `${shownHost(host)} is on a private network. Bulwark only connects to private addresses that you allow. Allow this if you know this server.`,
   pluginInstallTitle: (name: string) => `Install the plugin "${name}"?`,
   pluginPublisher: (publisher: string, verified: boolean) => `Published by ${publisher}${verified ? ' (verified)' : ''}. Its signature is checked.`,
   pluginNoPublisher: 'The directory names no publisher. Its signature is checked.',
   pluginPermissions: 'It asks to:',
   pluginNoPermissions: 'It asks for no special permissions.',
   pluginPrivileged: 'Warning: this plugin runs with full access to the app. It can read all your mail and accounts, and everything you do here. Only install it if you trust the publisher.',
-  serverSecondOriginTitle: (server: string) => `${server} also uses another server. Allow it?`,
-  serverSecondOriginDetail: (host: string) => `Your mail server says your attachments or messages are on ${host}. Bulwark sends your sign-in there if you allow this.`,
+  serverSecondOriginTitle: (server: string) => `${shownHost(server)} also uses another server. Allow it?`,
+  serverSecondOriginDetail: (host: string) => `Your mail server says your attachments or messages are on ${shownHost(host)}. Bulwark sends your sign-in there if you allow this.`,
   leaveTitle: 'Leave with unsaved changes?',
   leaveDetail: 'What you changed on this page is not saved yet.',
   leave: 'Leave',
@@ -337,33 +339,53 @@ const en = {
   certificateRemember: 'Remember this for {host}',
   certificateNone: "Don't send a certificate",
   certificateMore: 'More certificates…',
-  importScanTitle: (host: string) => `Let ${host} look for Thunderbird and Outlook data on this computer?`,
+  importScanTitle: (host: string) => `Let ${shownHost(host)} look for Thunderbird and Outlook data on this computer?`,
   importScanDetail: 'It gets a list of the mail folders and Outlook files in their usual places, with their names and sizes. It reads no mail until you confirm the list. A plugin may be asking.',
   importScanAllow: 'Look for mail data',
   importDeny: "Don't allow",
-  importReadTitle: (host: string, count: number) => `Let ${host} read ${count === 1 ? 'this file' : `these ${count} files`} to import your mail?`,
+  importReadTitle: (host: string, count: number) => `Let ${shownHost(host)} read ${count === 1 ? 'this file' : `these ${count} files`} to import your mail?`,
   importReadDetail: (size: string) => `It reads ${size} and copies the mail to your mail account. It can't reach other files. A plugin may be asking.`,
   importMore: (count: number) => `and ${count} more`,
-  importResumeTitle: (host: string) => `Continue importing mail into ${host}?`,
+  importResumeTitle: (host: string) => `Continue importing mail into ${shownHost(host)}?`,
   importResumeDetail: 'An import from this computer did not finish. It goes on where it stopped, with these files:',
   importResumeContinue: 'Continue',
   importResumeLater: 'Not now',
   importResumeStop: 'Stop this import',
+  recentAskTitle: (host: string) => `Let ${shownHost(host)} see the files you opened recently on this computer?`,
+  recentAskTitleApp: 'Show the files you opened recently on this computer when you attach a file?',
+  recentAskDetail: 'The page gets the names, folders and sizes of the last 20 files you opened in any program, and the content of one when you pick it to attach. A plugin may be asking.',
+  recentAskAllow: 'Show recent files',
+  recentAskDeny: "Don't allow",
+  driveAskTitle: (host: string) => `Let ${shownHost(host)} keep a folder of your files on this computer?`,
+  driveAskTitleApp: 'Keep a folder of the files of this account on this computer?',
+  driveAskDetail: (folder: string) => `This makes ${folder} and shows it in File Explorer, as OneDrive does. The server decides what goes in it, files of any kind included, and they open like your own. Only allow this for a server you trust with your files. A plugin may be asking.`,
+  driveAskAllow: 'Make the folder',
+  driveAskDeny: "Don't allow",
 };
 
 const de: typeof en = {
-  importScanTitle: (host) => `${host} auf diesem Computer nach Thunderbird- und Outlook-Daten suchen lassen?`,
+  importScanTitle: (host) => `${shownHost(host)} auf diesem Computer nach Thunderbird- und Outlook-Daten suchen lassen?`,
   importScanDetail: 'Es erhält eine Liste der Mail-Ordner und Outlook-Dateien an den üblichen Orten, mit Namen und Größe. Es liest keine E-Mails, bevor Sie die Liste bestätigen. Möglicherweise fragt ein Plugin.',
   importScanAllow: 'Nach Mail-Daten suchen',
   importDeny: 'Nicht zulassen',
-  importReadTitle: (host, count) => `${host} ${count === 1 ? 'diese Datei' : `diese ${count} Dateien`} lesen lassen, um Ihre E-Mails zu importieren?`,
+  importReadTitle: (host, count) => `${shownHost(host)} ${count === 1 ? 'diese Datei' : `diese ${count} Dateien`} lesen lassen, um Ihre E-Mails zu importieren?`,
   importReadDetail: (size) => `Es liest ${size} und kopiert die E-Mails in Ihr Konto. Andere Dateien erreicht es nicht. Möglicherweise fragt ein Plugin.`,
   importMore: (count) => `und ${count} weitere`,
-  importResumeTitle: (host) => `Import von E-Mails nach ${host} fortsetzen?`,
+  importResumeTitle: (host) => `Import von E-Mails nach ${shownHost(host)} fortsetzen?`,
   importResumeDetail: 'Ein Import von diesem Computer wurde nicht beendet. Er geht dort weiter, wo er aufgehört hat, mit diesen Dateien:',
   importResumeContinue: 'Fortsetzen',
   importResumeLater: 'Nicht jetzt',
   importResumeStop: 'Diesen Import beenden',
+  recentAskTitle: (host) => `${shownHost(host)} die Dateien sehen lassen, die Sie zuletzt auf diesem Computer geöffnet haben?`,
+  recentAskTitleApp: 'Beim Anhängen die Dateien zeigen, die Sie zuletzt auf diesem Computer geöffnet haben?',
+  recentAskDetail: 'Die Seite erhält Namen, Ordner und Größe der letzten 20 Dateien, die Sie in einem beliebigen Programm geöffnet haben, und den Inhalt einer Datei, wenn Sie sie zum Anhängen auswählen. Möglicherweise fragt ein Plugin.',
+  recentAskAllow: 'Zuletzt verwendete Dateien zeigen',
+  recentAskDeny: 'Nicht zulassen',
+  driveAskTitle: (host) => `${shownHost(host)} einen Ordner mit Ihren Dateien auf diesem Computer anlegen lassen?`,
+  driveAskTitleApp: 'Einen Ordner mit den Dateien dieses Kontos auf diesem Computer anlegen?',
+  driveAskDetail: (folder) => `Damit entsteht ${folder}, und der Explorer zeigt den Ordner wie OneDrive. Was darin liegt, bestimmt der Server, auch Dateien jeder Art, und sie öffnen sich wie Ihre eigenen. Lassen Sie das nur für einen Server zu, dem Sie Ihre Dateien anvertrauen. Möglicherweise fragt ein Plugin.`,
+  driveAskAllow: 'Ordner anlegen',
+  driveAskDeny: 'Nicht zulassen',
   unsavedTitle: 'Ein Entwurf konnte nicht gespeichert werden',
   unsavedDetail: 'Wenn Sie jetzt schließen, geht verloren, was Sie seit dem letzten Speichern geschrieben haben.',
   closeAnyway: 'Trotzdem schließen',
@@ -466,7 +488,7 @@ const de: typeof en = {
   crashAskTitle: 'Absturzberichte senden?',
   crashAskDetail: 'Fehler in der App werden mit einer zufälligen ID, Dateinamen aus dem eigenen Code der App und kurzen, bereinigten Meldungen gesendet. Stürzt die App selbst ab, bleibt eine Absturzdatei auf diesem Computer. Sie ist eine Kopie eines Teils des Arbeitsspeichers der App und kann daher den Text Ihrer E-Mails enthalten. Eine Absturzdatei verlässt den Computer nur, wenn Sie sie senden. Sie können das jederzeit ausschalten. Dabei werden die Absturzdateien gelöscht.',
   crashAskYes: 'Absturzberichte senden',
-  crashSendTitle: (host) => `Diesen Absturzbericht an ${host} senden?`,
+  crashSendTitle: (host) => `Diesen Absturzbericht an ${shownHost(host)} senden?`,
   crashSendDetail: 'Ein Absturzbericht ist eine Kopie eines Teils des Arbeitsspeichers der App beim Absturz. Bulwark entfernt Benutzernamen, Servernamen, Adressen und Anmeldetokens, die es findet, aber ein Absturzbericht kann trotzdem den Text Ihrer E-Mails enthalten. Senden Sie ihn nur an jemanden, dem Sie vertrauen.',
   crashSendYes: 'Senden',
   allow: 'Zulassen',
@@ -474,18 +496,18 @@ const de: typeof en = {
   install: 'Installieren',
   serverHttpTitle: 'Ohne Verschlüsselung verbinden?',
   serverHttpDetail: (host) =>
-    `${host} verwendet unverschlüsseltes http. Ihr Passwort und Ihre E-Mails gehen unverschlüsselt über das Netzwerk, und jeder in diesem Netzwerk kann sie lesen. Lassen Sie das nur für einen eigenen Server in einem Netzwerk zu, dem Sie vertrauen.`,
+    `${shownHost(host)} verwendet unverschlüsseltes http. Ihr Passwort und Ihre E-Mails gehen unverschlüsselt über das Netzwerk, und jeder in diesem Netzwerk kann sie lesen. Lassen Sie das nur für einen eigenen Server in einem Netzwerk zu, dem Sie vertrauen.`,
   serverLanTitle: 'Mit einem Server im lokalen Netzwerk verbinden?',
   serverLanDetail: (host) =>
-    `${host} liegt in einem privaten Netzwerk. Bulwark verbindet sich nur mit privaten Adressen, die Sie zulassen. Lassen Sie das zu, wenn Sie diesen Server kennen.`,
+    `${shownHost(host)} liegt in einem privaten Netzwerk. Bulwark verbindet sich nur mit privaten Adressen, die Sie zulassen. Lassen Sie das zu, wenn Sie diesen Server kennen.`,
   pluginInstallTitle: (name) => `Das Plugin „${name}“ installieren?`,
   pluginPublisher: (publisher, verified) => `Herausgeber: ${publisher}${verified ? ' (verifiziert)' : ''}. Seine Signatur wird geprüft.`,
   pluginNoPublisher: 'Das Verzeichnis nennt keinen Herausgeber. Die Signatur wird geprüft.',
   pluginPermissions: 'Es möchte:',
   pluginNoPermissions: 'Es fragt nach keinen besonderen Berechtigungen.',
   pluginPrivileged: 'Warnung: Dieses Plugin läuft mit vollem Zugriff auf die App. Es kann alle Ihre E-Mails und Konten lesen und alles, was Sie hier tun. Installieren Sie es nur, wenn Sie dem Herausgeber vertrauen.',
-  serverSecondOriginTitle: (server) => `${server} verwendet noch einen weiteren Server. Zulassen?`,
-  serverSecondOriginDetail: (host) => `Ihr Mailserver gibt an, dass Ihre Anhänge oder Nachrichten auf ${host} liegen. Wenn Sie das zulassen, sendet Bulwark Ihre Anmeldung auch dorthin.`,
+  serverSecondOriginTitle: (server) => `${shownHost(server)} verwendet noch einen weiteren Server. Zulassen?`,
+  serverSecondOriginDetail: (host) => `Ihr Mailserver gibt an, dass Ihre Anhänge oder Nachrichten auf ${shownHost(host)} liegen. Wenn Sie das zulassen, sendet Bulwark Ihre Anmeldung auch dorthin.`,
   leaveTitle: 'Mit ungespeicherten Änderungen verlassen?',
   leaveDetail: 'Was Sie auf dieser Seite geändert haben, ist noch nicht gespeichert.',
   leave: 'Verlassen',
@@ -697,12 +719,19 @@ const de: typeof en = {
 let uiLanguage: string | null = null;
 let labels: Partial<typeof en> = {};
 
-/** Keeps what fits: a known key with text, of a sane length, and no function replaced. */
+/**
+ * The questions that ask the user to allow something: switching to the beta channel or back
+ * to an older version, recent files, the Files drive. Their text is the shell's own, in English
+ * or German, whatever labels the page sent: the page that asks never words the question.
+ */
+const CONSENT_KEY = /^(updateBeta|updateOlder|recentAsk|driveAsk)/;
+
+/** Keeps what fits: a known key with text, of a sane length, no function replaced and no question that asks for consent. */
 export function cleanLabels(raw: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   if (!raw || typeof raw !== 'object') return out;
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!LABEL_KEY.test(key) || typeof value !== 'string' || !value.trim() || value.length > 300) continue;
+    if (!LABEL_KEY.test(key) || CONSENT_KEY.test(key) || typeof value !== 'string' || !value.trim() || value.length > 300) continue;
     if (typeof (en as Record<string, unknown>)[key] === 'string' && labelKeepsPlaceholders(key, value)) out[key] = value;
   }
   return out;
@@ -732,9 +761,13 @@ export function unsentDetail(text: Pick<typeof en, 'unsentOne' | 'unsentMany'>, 
   return count === 1 ? text.unsentOne : text.unsentMany.replaceAll('{count}', String(count));
 }
 
-/** Plain text with {name} placeholders, so the webmail can translate it (labels). */
+/** Plain text with {name} placeholders, so the webmail can translate it (labels). A `{host}` is a server's, shown as `shownHost` shows it. */
 export function fill(text: string, values: Record<string, string>): string {
-  return text.replace(/\{(\w+)\}/g, (whole, name: string) => values[name] ?? whole);
+  return text.replace(/\{(\w+)\}/g, (whole, name: string) => {
+    const value = values[name];
+    if (value === undefined) return whole;
+    return name === 'host' ? shownHost(value) : value;
+  });
 }
 
 /** The language the keystore's questions go by (keystore-strings.ts). */

@@ -7,7 +7,9 @@ import {
   newestShortcuts,
   parseMdfind,
   parseXbel,
+  RecentConsent,
   RECENT_FILES_MAX,
+  RECENT_NO_HOLD_MS,
   shownCandidates,
   usableShortcutTarget,
   type RecentCheck,
@@ -100,5 +102,109 @@ test.describe('recent files, by the rules', () => {
       { path: '/Users/me/Documents/Board minutes 2026.docx', usedAt: Date.parse('2026-10-30T09:12:44Z') },
       { path: '/Volumes/Team/plan.xlsx', usedAt: Date.parse('2026-10-30T09:00:00Z') },
     ]);
+  });
+});
+
+test.describe('whether a server may see the files', () => {
+  const A = 'https://mail.a.example';
+  const B = 'https://mail.b.example';
+
+  function consentWith(answers: boolean[] = []) {
+    const kept = new Set<string>();
+    const asked: string[] = [];
+    let now = 1_000_000;
+    let release: ((yes: boolean) => void) | null = null;
+    const consent = new RecentConsent({
+      store: { has: (origin) => kept.has(origin), add: (origin) => kept.add(origin), remove: (origin) => kept.delete(origin), clear: () => kept.clear() },
+      ask: (origin) => {
+        asked.push(origin);
+        if (answers.length) return Promise.resolve(answers.shift()!);
+        return new Promise<boolean>((resolve) => (release = resolve));
+      },
+      now: () => now,
+    });
+    return { consent, kept, asked, later: (ms: number) => (now += ms), answer: (yes: boolean) => release?.(yes) };
+  }
+
+  test('a yes is asked for once and kept for that server; another server is asked again', async () => {
+    const { consent, kept, asked } = consentWith([true, false]);
+    expect(await consent.decide(A)).toBe(true);
+    expect(await consent.decide(A)).toBe(true);
+    expect(asked).toEqual([A]);
+    expect([...kept]).toEqual([A]);
+    expect(await consent.decide(B)).toBe(false);
+    expect(asked).toEqual([A, B]);
+  });
+
+  test('a no holds for a while: five more calls ask nothing, then the next one asks again', async () => {
+    const { consent, asked, later } = consentWith([false, true]);
+    expect(await consent.decide(A)).toBe(false);
+    for (let call = 0; call < 5; call += 1) expect(await consent.decide(A)).toBe(false);
+    later(RECENT_NO_HOLD_MS - 1);
+    expect(await consent.decide(A)).toBe(false);
+    expect(asked).toEqual([A]);
+    later(2);
+    expect(await consent.decide(A)).toBe(true);
+    expect(asked).toEqual([A, A]);
+  });
+
+  test('one question at a time: a second call for the server gets the same answer, one for another a no', async () => {
+    const { consent, asked, answer } = consentWith();
+    const first = consent.decide(A);
+    const second = consent.decide(A);
+    expect(await consent.decide(B)).toBe(false);
+    await Promise.resolve();
+    expect(asked).toEqual([A]);
+    answer(true);
+    expect(await Promise.all([first, second])).toEqual([true, true]);
+  });
+
+  test('a question that fails to show is a no', async () => {
+    const consent = new RecentConsent({
+      store: { has: () => false, add: () => { throw new Error('kept'); }, remove: () => {}, clear: () => {} },
+      ask: () => Promise.reject(new Error('no window')),
+    });
+    expect(await consent.decide(A)).toBe(false);
+  });
+
+  test('taken back: the server is asked again, and so is every server after a wipe', async () => {
+    const { consent, asked } = consentWith([true, true, true, true]);
+    await consent.decide(A);
+    await consent.decide(B);
+    consent.forget(A);
+    expect(consent.allowed(A)).toBe(false);
+    expect(consent.allowed(B)).toBe(true);
+    await consent.decide(A);
+    consent.forget();
+    expect(consent.allowed(A) || consent.allowed(B)).toBe(false);
+    await consent.decide(B);
+    expect(asked).toEqual([A, B, A, B]);
+  });
+
+  test('scheme, host and port each make another server', async () => {
+    const { consent, asked } = consentWith([true, false]);
+    expect(await consent.decide('https://mail.example.org')).toBe(true);
+    for (const origin of ['http://mail.example.org', 'https://mail.example.org:8443', 'https://mail.example.org.', 'https://xn--mil-qla.example.org']) {
+      expect(consent.allowed(origin), origin).toBe(false);
+    }
+    expect(await consent.decide('https://mail.example.org:8443')).toBe(false);
+    expect(asked).toEqual(['https://mail.example.org', 'https://mail.example.org:8443']);
+  });
+
+  test('a no for one server neither answers nor holds for another, and calls at once for one server ask once', async () => {
+    const { consent, asked } = consentWith([false, true]);
+    expect(await Promise.all([consent.decide(A), consent.decide(A), consent.decide(A)])).toEqual([false, false, false]);
+    expect(asked).toEqual([A]);
+    expect(await consent.decide(B)).toBe(true);
+    expect(consent.allowed(A)).toBe(false);
+  });
+
+  test('a yes taken back while the question for another server is up stays taken back', async () => {
+    const { consent } = consentWith([true, true]);
+    expect(await consent.decide(A)).toBe(true);
+    const pending = consent.decide(B);
+    consent.forget(A);
+    expect(await pending).toBe(true);
+    expect(consent.allowed(A)).toBe(false);
   });
 });

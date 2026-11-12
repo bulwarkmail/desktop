@@ -80,6 +80,55 @@ export class SsoChain {
   }
 }
 
+/** Mail, phone, text and calendar addresses: another program opens them, and only on a click. */
+const CLICK_SCHEMES = new Set(['mailto:', 'tel:', 'sms:', 'webcal:']);
+const WEB_SCHEMES = new Set(['http:', 'https:']);
+/** Web addresses the app may open for one server without a click, all its windows together: as many as deep links, 5 in 10 seconds. */
+export const UNCLICKED_OPEN_MAX = 5;
+export const UNCLICKED_OPEN_MS = 10_000;
+
+/**
+ * Whether an address goes to the program the OS has for it. A web address opens in the browser
+ * on a click, and without one only while the app's windows opened fewer than UNCLICKED_OPEN_MAX
+ * that way in the last UNCLICKED_OPEN_MS (`recent`): the webmail opens a reminder's meeting link and
+ * a provider's sign-out page with no click of the window's own. Mail, phone, text and calendar
+ * addresses open only on a click. Any other scheme never leaves the app, and neither does an
+ * address with a user name or password in it.
+ */
+export function externalOpenAllowed(url: URL | null, clicked: boolean, recent: number): boolean {
+  if (!url || url.username || url.password) return false;
+  if (WEB_SCHEMES.has(url.protocol)) return clicked || recent < UNCLICKED_OPEN_MAX;
+  return CLICK_SCHEMES.has(url.protocol) && clicked;
+}
+
+/** The longest a server's name is shown in a question: past this it would push the rest out of view. */
+export const SHOWN_HOST_MAX = 52;
+
+/**
+ * A server's host (as `URL.host` gives it, punycode and port included) the way a question shows
+ * it: whole when it's short, else shortened in the middle of its left-hand labels, so the end
+ * that says whose server it is always shows. That end is the last two labels, or three under
+ * a country code with a short second level (`example.co.uk`); there is no public suffix list
+ * here, so for a name like `x.github.io` it keeps less than the registrable part. The port and
+ * an IPv6 literal are never cut.
+ */
+export function shownHost(host: string, max = SHOWN_HOST_MAX): string {
+  if (host.length <= max || host.startsWith('[')) return host;
+  const port = /:\d+$/.exec(host)?.[0] ?? '';
+  const labels = host.slice(0, host.length - port.length).split('.');
+  const last = labels[labels.length - 1] ?? '';
+  const second = labels[labels.length - 2] ?? '';
+  const keep = labels.length >= 3 && /^[a-z]{2}$/i.test(last) && second.length <= 3 ? 3 : 2;
+  if (labels.length <= keep) return host;
+  const tail = `${labels.slice(-keep).join('.')}${port}`;
+  const head = labels.slice(0, -keep).join('.');
+  // What's left for the left-hand part, less the dot before the tail and the ellipsis.
+  const room = max - tail.length - 2;
+  if (room < 2) return `….${tail}`;
+  const start = Math.ceil(room / 2);
+  return `${head.slice(0, start)}…${head.slice(head.length - (room - start))}.${tail}`;
+}
+
 export function looksLikeProviderLogout(url: URL): boolean {
   return (
     url.searchParams.has('post_logout_redirect_uri') ||

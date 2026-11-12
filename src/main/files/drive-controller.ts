@@ -4,9 +4,13 @@
  * (`place`, `update`, `markInSync`) and supplies a file's bytes when someone opens it
  * (drive-fetch.ts). This keeps the sync roots, their folders, the pins and the letter.
  *
- * - Turned on (`enable`): needs a real click the first time. After that the wish is kept, and
- *   the page turns it on again after each sign-in without one. Never before a sign-in: at a
- *   start nothing registers or connects until the page asks.
+ * - Turned on (`enable`): the first time for a server and account it needs a real click and
+ *   the user's yes to main's own question, which names the server and the folder (`consent`).
+ *   After that the wish is kept, and the page turns it on again after each sign-in without
+ *   either. A no holds for a while for the server, whatever account the page names next, and
+ *   one server puts the question up at most three times while the app runs. Never before a
+ *   sign-in: at a start nothing registers or connects until the page asks. Turned off by the
+ *   user, it asks again the next time.
  * - Turned off (`disable`): the sync root goes, with its folder. What was written here and isn't
  *   in Files yet is copied to `Documents\Bulwark – not uploaded\<date>` first (drive-rescue.ts);
  *   only a wipe deletes without that. `signed-out` keeps the wish and the pins, so the next
@@ -15,9 +19,13 @@
  *   sign-in connects it again.
  * - `FilesDriveEnabled` off: the page gets a moment to upload what waits, then every sync root
  *   goes (rescued as above), and none comes back while it's off. The wishes stay.
- * - A wipe: every sync root of this provider, their folders, the letter and the wishes.
+ * - A wipe: every sync root of this profile, their folders, the letter and the wishes.
  * - "Always keep on this device" and "Free up space": the shell sets the pin attribute. A
  *   watcher sees it change, and this fetches the file or drops its content.
+ *
+ * Whatever runs, it only ever looks at sync roots this profile registered (`rootKey`): another
+ * profile of the app (a second install, a test build, a development run) has its own, and they
+ * stay as they are. A drive letter another profile's drive is on keeps its name too.
  *
  * No Electron here: features/files-drive.ts wires it to IPC, the policies and the wipe, and
  * plain Node tests drive it with the real helper.
@@ -53,15 +61,18 @@ import {
   folderNameFor,
   freeLetters,
   inside,
+  keyOfRoot,
   letterTarget,
   nativeStatusOf,
-  relativeParts,
+  profileKey,
+  rootKey,
   trayLineOf,
   resolveUnder,
   statusClassId,
   syncRootPrefix,
   wantedLetter,
 } from './drive-places';
+import { splitRelative } from './paths';
 import type { RegisteredRoot } from './registry';
 
 export type DisableReason = 'user' | 'signed-out' | 'suspended' | 'wipe' | 'refused';
@@ -78,6 +89,8 @@ export interface StoredDriveAccount {
   folder: string;
   rootId: string;
   createdAt: number;
+  /** The account part of its sync root's id. Absent: the account's key alone, as older versions registered it. */
+  key?: string;
   /** Signed out: no sync root now, and the next sign-in brings it back. */
   signedOut?: boolean;
   /** Signed out without asking for it: registered, folder kept, not connected until the next sign-in. */
@@ -151,7 +164,32 @@ export interface DriveDeps {
   rescued?: (rescued: Rescued, reason: DisableReason | 'policy' | 'start') => void;
   /** The pin attribute, as the shell sets it: the native helper's (NativeHelper.system.setPin). None: pins fail. */
   setPin?: (absolute: string, pin: 'pinned' | 'unpinned' | 'unspecified') => Promise<boolean>;
+  /**
+   * The user's yes to a drive for this server and an account, kept in the shell's state and
+   * asked for in main's own question window (features/files-drive.ts). Absent: nobody is asked.
+   */
+  consent?: DriveConsent;
 }
+
+export interface DriveConsent {
+  /** The server the yes is for, as the app knows it (scheme, host and port), never the page's word. */
+  origin: string;
+  /** A yes for this account; with none, a yes for any account of this server. */
+  has(account?: string): boolean;
+  add(account: string): void;
+  remove(account: string): void;
+  clear(): void;
+  /** True for yes. `folder` is where the account's folder is, or will be. */
+  ask(account: string, label: string, folder: string): Promise<boolean>;
+}
+
+/**
+ * How long a no to the question holds for the server, whatever account the page names next:
+ * the account is the page's word, and a new name each time would ask again each time.
+ */
+export const DRIVE_NO_HOLD_MS = 10 * 60_000;
+/** How many times one server may put the question up while the app runs; after that it asks no more. */
+export const DRIVE_QUESTIONS_MAX = 3;
 
 /** Without the helper's call there's nothing that sets the attribute. */
 const noPin = async (): Promise<boolean> => false;
@@ -161,6 +199,8 @@ interface Live {
   root: FilesRoot;
   dir: string;
   syncRootId: string;
+  /** The account part of `syncRootId`. */
+  key: string;
   connection: string;
   watcher: FSWatcher | null;
   /** Pins from before a sign-out still to put back, by path in the root. */
@@ -203,6 +243,10 @@ export class DriveController {
   private readonly statuses = new Map<string, FilesDriveStatus>();
   /** Serving Explorer's status: null until tried, false where Windows has none or it failed. */
   private statusServed: boolean | null = null;
+  /** Per server, until when a no to the question holds. */
+  private readonly refusedUntil = new Map<string, number>();
+  /** Per server, how many times the question was put up while the app runs. */
+  private readonly questionsAsked = new Map<string, number>();
 
   constructor(private readonly deps: DriveDeps) {
     this.warn = deps.warn ?? console.warn;
@@ -311,8 +355,30 @@ export class DriveController {
       if (this.deps.policy().forcedOff) return fail('policy');
       if (!validText(account, MAX_ACCOUNT) || !validText(label, MAX_LABEL)) return fail('failed');
       const stored = this.deps.store.read().accounts?.[account];
-      // The first time takes a click. After that the wish stands, and a sign-in brings it back.
-      if (!stored && !gesture()) return fail('gesture');
+      const { consent } = this.deps;
+      // The first time takes a click, and the user's yes for this server. After that the wish
+      // stands, and a sign-in brings it back.
+      if (!stored || (consent && !consent.has(account))) {
+        if (!gesture()) return fail('gesture');
+        if (consent && !consent.has(account)) {
+          // Held per server, not per account: the page names the account.
+          const { origin } = consent;
+          if ((this.refusedUntil.get(origin) ?? 0) > this.now()) return fail('cancelled');
+          const asked = this.questionsAsked.get(origin) ?? 0;
+          if (asked >= DRIVE_QUESTIONS_MAX) return fail('cancelled');
+          this.questionsAsked.set(origin, asked + 1);
+          const folder = path.win32.join(this.base(), this.folderNameOf(account, label, stored));
+          const yes = await consent.ask(account, label, folder).then((answer) => answer === true, () => false);
+          if (!yes) {
+            this.refusedUntil.set(origin, this.now() + DRIVE_NO_HOLD_MS);
+            return fail('cancelled');
+          }
+          consent.add(account);
+          this.refusedUntil.delete(origin);
+          // Turned off while it asked.
+          if (this.deps.policy().forcedOff) return fail('policy');
+        }
+      }
       const running = this.live.get(account);
       if (running) return ok(running.root);
       const result = await this.start(account, label, stored);
@@ -325,13 +391,18 @@ export class DriveController {
     });
   }
 
-  private async start(account: string, label: string, stored: StoredDriveAccount | undefined): Promise<FilesResult<FilesRoot>> {
-    const native = this.native();
-    const { base } = this.deps;
+  /** The name of an account's folder under the base: the one it has, or a new one for its label. */
+  private folderNameOf(account: string, label: string, stored: StoredDriveAccount | undefined): string {
     const others = Object.entries(this.deps.store.read().accounts ?? {})
       .filter(([other]) => other !== account)
       .map(([, entry]) => entry.folder);
-    const folder = stored?.folder ?? folderNameFor(label, others);
+    return stored?.folder ?? folderNameFor(label, others);
+  }
+
+  private async start(account: string, label: string, stored: StoredDriveAccount | undefined): Promise<FilesResult<FilesRoot>> {
+    const native = this.native();
+    const { base } = this.deps;
+    const folder = this.folderNameOf(account, label, stored);
     const dir = path.win32.join(base, folder);
     let real: string;
     try {
@@ -344,7 +415,7 @@ export class DriveController {
       this.warn(`The drive's folder couldn't be made: ${(error as Error).message}`);
       return fail('failed');
     }
-    const key = accountKey(this.deps.profile, account);
+    const key = this.keyOf(account, stored);
     const count = [...this.live.keys()].filter((other) => other !== account).length + 1;
     let syncRootId: string;
     try {
@@ -378,7 +449,7 @@ export class DriveController {
       paused: false,
       createdAt: stored?.createdAt ?? this.now(),
     };
-    const live: Live = { account, root, dir: real, syncRootId, connection, watcher: null, pins: new Set(stored?.pins ?? []) };
+    const live: Live = { account, root, dir: real, syncRootId, key, connection, watcher: null, pins: new Set(stored?.pins ?? []) };
     this.live.set(account, live);
     this.deps.registry.add({
       root,
@@ -388,7 +459,7 @@ export class DriveController {
     });
     this.writeAccounts((accounts) => {
       // Pins wait until the page has placed their paths again.
-      accounts[account] = { label, folder, rootId: root.id, createdAt: root.createdAt, ...(live.pins.size > 0 ? { pins: [...live.pins] } : {}) };
+      accounts[account] = { label, folder, rootId: root.id, createdAt: root.createdAt, key, ...(live.pins.size > 0 ? { pins: [...live.pins] } : {}) };
     });
     if (this.deps.watchPins !== false) live.watcher = this.watchPins(live);
     return ok(root);
@@ -420,6 +491,8 @@ export class DriveController {
           accounts[account] = { ...rest, signedOut: true, ...(pins.length > 0 ? { pins } : {}) };
         } else delete accounts[account];
       });
+      // Gone for good: turning it on again asks again. A sign-out keeps the yes with the wish.
+      if (why !== 'signed-out') this.deps.consent?.remove(account);
       await this.relabel();
       await this.applyLetter();
       this.emit();
@@ -528,7 +601,7 @@ export class DriveController {
   private async stop(account: string, removeFolder: boolean, keep: DisableReason | 'policy' | null = null): Promise<Rescued | null> {
     const live = this.live.get(account);
     const stored = this.deps.store.read().accounts?.[account];
-    const key = accountKey(this.deps.profile, account);
+    const key = live?.key ?? this.keyOf(account, stored);
     let dir: string | null = null;
     let rescued: Rescued | null = null;
     if (live) {
@@ -562,7 +635,7 @@ export class DriveController {
     this.statuses.delete(account);
     // Unregistering takes the status class's value with the sync root's key.
     for (const root of await this.ourRoots()) {
-      if (root.id.endsWith(`!${key}`)) await this.unregister(root);
+      if (keyOfRoot(root.id) === key) await this.unregister(root);
     }
     if (removeFolder && dir) this.removeFolder(dir);
     this.stopStatusWhenIdle();
@@ -591,11 +664,32 @@ export class DriveController {
     }
   }
 
+  /**
+   * The account part of an account's sync root id: the one it was stored with, the account's
+   * key alone for an account stored before ids had the profile in them, and `rootKey` for one
+   * that has none yet.
+   */
+  private keyOf(account: string, stored: StoredDriveAccount | undefined): string {
+    if (!stored) return rootKey(this.deps.profile, account);
+    return stored.key ?? accountKey(this.deps.profile, account);
+  }
+
+  /**
+   * This user's sync roots that this profile registered: this provider's, with this profile's
+   * key in the id, or with a key one of this profile's stored accounts has. Any other root,
+   * another profile's or one nobody stored names, is never connected to, rescued or removed.
+   */
   private async ourRoots(): Promise<NativeSyncRoot[]> {
     if (!this.deps.native) return [];
     try {
       const prefix = syncRootPrefix(this.deps.provider);
-      return (await this.deps.native.filesDriveRoots()).filter((root) => root.id.startsWith(prefix));
+      const own = `${profileKey(this.deps.profile)}-`;
+      const stored = new Set(Object.entries(this.deps.store.read().accounts ?? {}).map(([account, entry]) => this.keyOf(account, entry)));
+      return (await this.deps.native.filesDriveRoots()).filter((root) => {
+        if (!root.id.startsWith(prefix)) return false;
+        const key = keyOfRoot(root.id);
+        return key.startsWith(own) || stored.has(key);
+      });
     } catch (error) {
       this.warn(`Listing the sync roots failed: ${(error as Error).message}`);
       return [];
@@ -617,7 +711,7 @@ export class DriveController {
       try {
         await this.native().filesDriveRegister({
           provider: this.deps.provider,
-          account: accountKey(this.deps.profile, live.account),
+          account: live.key,
           path: live.dir,
           displayName: displayNameFor(live.root.remoteLabel, count),
           icon: this.deps.icon,
@@ -657,10 +751,10 @@ export class DriveController {
     if (this.deps.policy().forcedOff) return;
     const labels = new Map<string, string>();
     for (const [account, entry] of Object.entries(this.deps.store.read().accounts ?? {})) {
-      if (!entry.signedOut) labels.set(accountKey(this.deps.profile, account), entry.label);
+      if (!entry.signedOut) labels.set(this.keyOf(account, entry), entry.label);
     }
     for (const root of await this.ourRoots()) {
-      const key = root.id.split('!').at(-1) ?? '';
+      const key = keyOfRoot(root.id);
       const label = labels.get(key);
       // An older helper lists no icon: nothing to compare, so nothing changes.
       if (label === undefined || !root.path || typeof root.icon !== 'string') continue;
@@ -695,13 +789,13 @@ export class DriveController {
   private async settleWithPolicy(): Promise<void> {
     const forcedOff = this.deps.policy().forcedOff;
     const accounts = this.deps.store.read().accounts ?? {};
-    const wanted = new Set(Object.entries(accounts).filter(([, entry]) => !forcedOff && !entry.signedOut).map(([account]) => accountKey(this.deps.profile, account)));
+    const wanted = new Set(Object.entries(accounts).filter(([, entry]) => !forcedOff && !entry.signedOut).map(([account, entry]) => this.keyOf(account, entry)));
     if (forcedOff) {
       for (const account of [...this.live.keys()]) await this.stop(account, true, 'policy');
       for (const entry of Object.values(accounts)) await this.rescueAndRemove(path.win32.join(this.base(), entry.folder), 'policy');
     }
     for (const root of await this.ourRoots()) {
-      const key = root.id.split('!').at(-1) ?? '';
+      const key = keyOfRoot(root.id);
       if (wanted.has(key)) continue;
       // Ours by id, but only a folder inside the drive's own is ever deleted.
       if (root.path) await this.rescueAndRemove(root.path, 'start');
@@ -719,7 +813,7 @@ export class DriveController {
     this.removeFolder(dir);
   }
 
-  /** The wipe: every sync root of ours, their folders, the letter and every wish. */
+  /** The wipe: every sync root of this profile's, their folders, the letter and every wish. */
   wipe(): Promise<void> {
     return this.serial(async () => {
       for (const account of [...this.live.keys()]) await this.stop(account, true);
@@ -729,6 +823,8 @@ export class DriveController {
         await this.unregister(root);
       }
       this.deps.store.write({});
+      this.deps.consent?.clear();
+      this.refusedUntil.clear();
       await this.applyLetter();
       this.emit();
     });
@@ -850,6 +946,8 @@ export class DriveController {
       if (letter !== null && (typeof letter !== 'string' || !/^[D-Z]$/.test(letter))) return fail('failed');
       if (letter !== null) {
         if (!gesture()) return fail('gesture');
+        // A letter for a drive the user said yes to for this server, and none before that.
+        if (this.deps.consent && !this.deps.consent.has()) return fail('gesture');
         if (!this.letterState().available.includes(letter)) return fail('exists');
       }
       const stored = this.deps.store.read();
@@ -892,9 +990,18 @@ export class DriveController {
       this.warn(`Setting the drive letter failed: ${(error as Error).message}`);
     }
     if (!labels) return;
+    // A letter mapped to a folder outside this profile's drive folder is another drive's, such
+    // as another profile's, whose name has the app's icon as well: that name stays.
+    const elsewhere = new Set<string>();
+    try {
+      for (const [mapped, to] of await this.deps.letters.list()) if (!inside(this.base(), to)) elsewhere.add(mapped);
+    } catch (error) {
+      this.warn(`Reading the drive letters failed: ${(error as Error).message}`);
+      return;
+    }
     // Every letter this may have named: the one before, the one it wanted and didn't get, and
     // the stored and the policy's, for a name a crash left behind.
-    const others = new Set([before, letter, chosen, policyLetter].filter((other): other is string => !!other && /^[D-Z]$/.test(other) && other !== this.letterNow));
+    const others = new Set([before, letter, chosen, policyLetter].filter((other): other is string => !!other && /^[D-Z]$/.test(other) && other !== this.letterNow && !elsewhere.has(other)));
     for (const other of others) {
       try {
         await releaseLetterLabel(labels, other, this.deps.icon);
@@ -931,7 +1038,9 @@ export class DriveController {
     const groups = new Map<string, { index: number; name: string; entry: FilesPlaceholder }[]>();
     entries.forEach((raw, index) => {
       const entry = raw as FilesPlaceholder;
-      const parts = relativeParts(entry?.path);
+      // The same check as every other files path: no reserved device name, no trailing dot or space.
+      const checked = splitRelative(entry?.path, 'win32');
+      const parts = checked.ok ? checked.parts : null;
       const valid =
         parts &&
         (entry.kind === 'file' || entry.kind === 'directory') &&
@@ -942,7 +1051,7 @@ export class DriveController {
         entry.identity.length > 0 &&
         Buffer.byteLength(entry.identity) <= 4096;
       if (!valid) {
-        answers[index].error = parts ? 'failed' : 'outside';
+        answers[index].error = checked.ok ? 'failed' : checked.error;
         return;
       }
       const parent = parts.slice(0, -1).join('/');

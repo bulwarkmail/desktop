@@ -11,10 +11,19 @@ import { lstatSync, type BigIntStats } from 'node:fs';
 import path from 'node:path';
 import type { FilesDriveStatus, FilesError, FilesLocalEntry, FilesPlaceholderState } from '../../shared/bridge';
 import type { NativeDriveStatus } from '../native-loader';
+import { splitRelative } from './paths';
 
 export const DRIVE_PROVIDER = 'Bulwark';
+/** A test build's own, as it has an AppUserModelID of its own: its sync roots are never the installed app's. */
+export const DRIVE_TEST_PROVIDER = 'Bulwark Test';
 export const DRIVE_FOLDER = 'Bulwark Files';
 export const DRIVE_NAME = 'Bulwark Files';
+
+/** The provider part of the sync roots' ids: a test's own when it names one, else the build's. */
+export function driveProvider(o: { chosen: string | null | undefined; testBuild: boolean }): string {
+  if (o.chosen) return o.chosen;
+  return o.testBuild ? DRIVE_TEST_PROVIDER : DRIVE_PROVIDER;
+}
 
 /**
  * The folder the accounts' sync roots go in. A test build keeps it in its own profile: in the
@@ -26,9 +35,29 @@ export function driveBase(o: { chosen: string | null | undefined; testBuild: boo
   return path.join(o.testBuild ? o.profile : o.home, DRIVE_FOLDER);
 }
 
-/** The account part of a sync root's id: never the address, and different per profile. */
+/** An account's own key: never the address, and different per profile. */
 export function accountKey(profile: string, account: string): string {
   return createHash('sha256').update(`${profile}\0${account}`).digest('hex').slice(0, 24);
+}
+
+/** The first part of the account part of every sync root id this profile registers. */
+export function profileKey(profile: string): string {
+  return createHash('sha256').update(`Bulwark Files profile\0${profile}`).digest('hex').slice(0, 16);
+}
+
+/**
+ * The account part of a sync root's id (`<provider>!<user SID>!<this>`): the profile's key, a
+ * dash, the account's key. A root whose id starts with another profile's key is that profile's,
+ * and nothing here touches it. An id with the account's key alone is the form older versions
+ * registered: it counts as this profile's only while this profile's stored accounts name it.
+ */
+export function rootKey(profile: string, account: string): string {
+  return `${profileKey(profile)}-${accountKey(profile, account)}`;
+}
+
+/** The account part of a sync root's id. */
+export function keyOfRoot(id: string): string {
+  return id.split('!').at(-1) ?? '';
 }
 
 /**
@@ -87,9 +116,12 @@ export function displayNameFor(label: string, accounts: number): string {
 
 const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
-/** A folder name for an address that Windows can hold, unlike any in `taken` (case aside). */
+/**
+ * A folder name for an address that Windows can hold, unlike any in `taken` (case aside). It is
+ * shown in the question before the drive is made, so marks that turn text round go too.
+ */
 export function folderNameFor(label: string, taken: readonly string[]): string {
-  let name = label.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '').trim().slice(0, 120);
+  let name = label.replace(/[‎‏‪-‮⁦-⁩]/g, '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '').trim().slice(0, 120);
   if (!name || RESERVED.test(name)) name = `_${name || 'account'}`;
   const lower = new Set(taken.map((entry) => entry.toLowerCase()));
   if (!lower.has(name.toLowerCase())) return name;
@@ -116,12 +148,14 @@ export function relativeParts(relative: unknown): string[] | null {
 export type Resolved = { ok: true; absolute: string; parts: string[] } | { ok: false; error: FilesError };
 
 /**
- * A path under a root, as an absolute path. Refused when it leaves the root, or when a folder
- * on the way is a link or a junction: something on the other end isn't the drive's.
+ * A path under a root, as an absolute path. Refused when it leaves the root, when a part is a
+ * name Windows can't hold as a file (`splitRelative`, as for every other files path), or when a
+ * folder on the way is a link or a junction: something on the other end isn't the drive's.
  */
 export function resolveUnder(rootDir: string, relative: unknown, lstat: (file: string) => { isSymbolicLink(): boolean } | null = lstatOrNull): Resolved {
-  const parts = relativeParts(relative);
-  if (!parts) return { ok: false, error: 'outside' };
+  const checked = splitRelative(relative, 'win32');
+  if (!checked.ok) return checked;
+  const { parts } = checked;
   let at = rootDir;
   for (const part of parts) {
     at = path.win32.join(at, part);

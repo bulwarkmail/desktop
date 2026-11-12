@@ -106,6 +106,8 @@ export interface ShellState {
   keyLossTold?: string;
   /** Instances the user said may use the OS keystore. Revocable in the webmail's settings. */
   keystoreOrigins?: string[];
+  /** Origins the user said may see the files they opened recently (features/os-recent.ts). Gone at a wipe. */
+  recentFilesOrigins?: string[];
   /** The browser sign-in page's port per mail server, so what a password manager saved keeps matching. */
   signInPorts?: Record<string, number>;
   /**
@@ -120,6 +122,8 @@ export interface ShellState {
   importJobs?: StoredImportJob[];
   /** The Files drive: the accounts the user turned it on for, and the letter they chose. */
   filesDrive?: StoredDrive;
+  /** The servers and accounts the user said may keep a Files drive here (features/files-drive.ts). */
+  filesDriveConsent?: { origin: string; account: string }[];
   /** The print preview's last destination and the choices per destination (print-rules.ts). */
   print?: PrintMemory;
 }

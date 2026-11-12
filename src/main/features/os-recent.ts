@@ -6,10 +6,14 @@
  * was written; on macOS Spotlight's last-used date; on Linux GTK's recently-used.xbel.
  *
  * The list is read when the menu opens, from a click or key press main saw itself, and kept
- * in memory for the window that asked until it asks again. The page gets what the menu shows:
- * name, folder, path, when, an icon, and an id. Attaching takes the id, never a path, so the
- * page can only ever have main read a file it just listed, and only with another click. Then
- * the bytes go the way a file from "Open with" does, to the composer's own checks.
+ * in memory for the window that asked until it asks again. A click only says the user did
+ * something, so the first list for a server also asks, in the shell's own question window
+ * with no as the default, whether that server may see these files (RecentConsent). A yes is
+ * kept per origin in the shell's state until it's taken back or the app is wiped; a no holds
+ * for a while. The page gets what the menu shows: name, folder, path, when, an icon, and an
+ * id. Attaching takes the id, never a path, so the page can only ever have main read a file
+ * it was listed after a yes, and only with another click. Then the bytes go the way a file
+ * from "Open with" does, to the composer's own checks.
  *
  * Every file system call goes through recent-files-worker.ts, in a process main can stop
  * waiting for: a share that's offline must not hold up the menu, or main. Whatever doesn't
@@ -23,11 +27,14 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { app, shell, utilityProcess, type UtilityProcess, type WebContents } from 'electron';
+import { app, BrowserWindow, shell, utilityProcess, type IpcMainInvokeEvent, type UtilityProcess, type WebContents } from 'electron';
 import { CHANNEL, type RecentFile, type RecentFileAttachResult, type RecentFilesResult } from '../../shared/bridge';
 import { effectivePolicyValue } from '../../shared/policy-schema';
+import { showMessageBox } from '../message-box';
+import { strings } from '../strings';
 import { takeUserGesture, watchUserGestures } from '../user-gesture';
 import type { RecentWorkerMessage, RecentWorkerRequest } from '../recent-files-worker';
+import { addWipeStep } from './local-wipe';
 import type { OsHub } from './os-hub';
 import { policies } from './policies';
 import { MAX_LAUNCH_FILE_BYTES } from './os-rules';
@@ -40,6 +47,7 @@ import {
   newestShortcuts,
   parseMdfind,
   parseXbel,
+  RecentConsent,
   RECENT_FILES_MAX,
   shownCandidates,
   usableShortcutTarget,
@@ -208,12 +216,23 @@ async function iconOf(file: string): Promise<string | undefined> {
 }
 
 export interface RecentHandle {
-  list: (sender: WebContents) => Promise<RecentFilesResult>;
-  attach: (sender: WebContents, id: unknown) => Promise<RecentFileAttachResult>;
+  list: (sender: WebContents, origin: string) => Promise<RecentFilesResult>;
+  attach: (sender: WebContents, origin: string, id: unknown) => Promise<RecentFileAttachResult>;
+  /** Takes back a server's yes, or every one: its lists go, and the next list asks again. */
+  forget: (origin?: string) => void;
 }
 
 export function recentFilesAllowed(): boolean {
   return effectivePolicyValue(policies.snapshot.RecentFilesInAttach, undefined) !== false;
+}
+
+/** The page that called: a main frame on the app's origin, as the channel checked. */
+function originOf(event: IpcMainInvokeEvent): string {
+  try {
+    return new URL(event.senderFrame?.url ?? '').origin;
+  } catch {
+    return 'null';
+  }
 }
 
 export function setupRecentFiles(hub: OsHub): RecentHandle {
@@ -228,6 +247,45 @@ export function setupRecentFiles(hub: OsHub): RecentHandle {
     if (!recentFilesAllowed()) listed.clear();
   });
 
+  const state = hub.ctx.state;
+  const stored = () => state.data.recentFilesOrigins ?? [];
+  const keep = (origins: string[]) => {
+    state.data.recentFilesOrigins = origins;
+    state.save();
+  };
+  /** Its text is the shell's own: no label the page sent reaches it (strings.ts). */
+  const ask = async (origin: string, window: unknown): Promise<boolean> => {
+    const text = strings();
+    const options = {
+      type: 'question' as const,
+      message: hub.ctx.mode === 'instance' ? text.recentAskTitle(new URL(origin).host) : text.recentAskTitleApp,
+      detail: text.recentAskDetail,
+      buttons: [text.recentAskAllow, text.recentAskDeny],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    };
+    const parent = window instanceof BrowserWindow && !window.isDestroyed() ? window : null;
+    const { response } = await (parent ? showMessageBox(parent, options) : showMessageBox(options));
+    return response === 0;
+  };
+  const consent = new RecentConsent({
+    store: {
+      has: (origin) => stored().includes(origin),
+      add: (origin) => keep([...stored().filter((entry) => entry !== origin), origin]),
+      remove: (origin) => keep(stored().filter((entry) => entry !== origin)),
+      clear: () => keep([]),
+    },
+    ask,
+  });
+  const forget = (origin?: string) => {
+    consent.forget(origin);
+    // An id from a list before is no way in any more.
+    listed.clear();
+  };
+  // A wipe takes every server's yes: the next list asks again.
+  addWipeStep(async () => forget());
+
   const remember = (sender: WebContents, ids: Map<string, string>) => {
     if (!listed.has(sender.id)) {
       const id = sender.id;
@@ -236,10 +294,16 @@ export function setupRecentFiles(hub: OsHub): RecentHandle {
     listed.set(sender.id, ids);
   };
 
-  const list = async (sender: WebContents): Promise<RecentFilesResult> => {
+  const list = async (sender: WebContents, origin: string): Promise<RecentFilesResult> => {
     if (!recentFilesAllowed()) return { ok: false, reason: 'policy' };
     if (hub.locked) return { ok: false, reason: 'locked' };
     if (!takeUserGesture(sender)) return { ok: false, reason: 'gesture' };
+    // A no answers as no click does: the page shows no list either way.
+    if (!(await consent.decide(origin, BrowserWindow.fromWebContents(sender)))) return { ok: false, reason: 'gesture' };
+    // Locked or switched off while it asked.
+    if (!recentFilesAllowed()) return { ok: false, reason: 'policy' };
+    if (hub.locked) return { ok: false, reason: 'locked' };
+    if (sender.isDestroyed()) return { ok: false, reason: 'gesture' };
     const session = new WorkerSession();
     try {
       const found = newestCandidates(await candidates(session), process.platform);
@@ -272,9 +336,10 @@ export function setupRecentFiles(hub: OsHub): RecentHandle {
           ...(icon ? { icon } : {}),
         };
       }));
-      // Locked or switched off while it looked.
+      // Locked or switched off while it looked, or the yes taken back.
       if (!recentFilesAllowed()) return { ok: false, reason: 'policy' };
       if (hub.locked) return { ok: false, reason: 'locked' };
+      if (!consent.allowed(origin)) return { ok: false, reason: 'gesture' };
       if (!sender.isDestroyed()) remember(sender, ids);
       return { ok: true, files };
     } finally {
@@ -282,11 +347,12 @@ export function setupRecentFiles(hub: OsHub): RecentHandle {
     }
   };
 
-  const attach = async (sender: WebContents, id: unknown): Promise<RecentFileAttachResult> => {
+  const attach = async (sender: WebContents, origin: string, id: unknown): Promise<RecentFileAttachResult> => {
     if (!recentFilesAllowed()) return { ok: false, reason: 'policy' };
     if (hub.locked) return { ok: false, reason: 'locked' };
     if (!takeUserGesture(sender)) return { ok: false, reason: 'gesture' };
-    const file = typeof id === 'string' ? listed.get(sender.id)?.get(id) : undefined;
+    // Only a list this server was given after a yes it still has.
+    const file = typeof id === 'string' && consent.allowed(origin) ? listed.get(sender.id)?.get(id) : undefined;
     if (!file) return { ok: false, reason: 'unknown' };
     const session = new WorkerSession();
     let answer: Extract<RecentWorkerMessage, { type: 'read' }> | null = null;
@@ -307,7 +373,7 @@ export function setupRecentFiles(hub: OsHub): RecentHandle {
     return { ok: true, file: { name: displayName(file, process.platform), data: read.data } };
   };
 
-  hub.ctx.handle(CHANNEL.recentFilesList, (event) => list(event.sender));
-  hub.ctx.handle(CHANNEL.recentFilesAttach, (event, _window, id) => attach(event.sender, id));
-  return { list, attach };
+  hub.ctx.handle(CHANNEL.recentFilesList, (event) => list(event.sender, originOf(event)));
+  hub.ctx.handle(CHANNEL.recentFilesAttach, (event, _window, id) => attach(event.sender, originOf(event), id));
+  return { list, attach, forget };
 }

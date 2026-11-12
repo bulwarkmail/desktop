@@ -133,6 +133,8 @@ The ARM64 MSI is marked x64 inside, because electron-builder's WiX has no arm64,
 
 **NSIS, per user.** `Bulwark-Setup-1.0.0-x64.exe /S` needs no elevation. Uninstalling leaves the user's mail profile in `%APPDATA%\Bulwark` on purpose: delete the folder to remove it too. Under `%LOCALAPPDATA%\Bulwark` it leaves only copies of attachments someone still had open for editing and the folder sync's records, if there are any. Both uninstallers take the app out of Default apps, Open with and Send to.
 
+**The Files drive.** The app only ever removes Files drives that its own profile registered. Earlier versions registered them with ids of the form `Bulwark!<user SID>!<24 hex digits>` (under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager`), with nothing in them that says which profile they belong to. The app still takes such a drive as its own while the profile's settings name its account. One they don't name, for example after the profile folder was deleted, stays in Explorer's navigation pane, and nothing in the app removes it.
+
 **Policies.** `packaging/bulwark-policies.sample.reg` is a sample to start from, with `AutoUpdate` and `UpdateChannel` set. Import it with `reg import`, or use the ADMX templates. `AutoUpdate=0` stops every request for updates, on any install. Values under `Software\Policies\Bulwark\Desktop` are forced, the same under `\Recommended` are defaults. `AutoUpdate` has no recommended form: nobody can choose it in the app, so there's nothing for it to be a default of.
 
 **winget.** `packaging/winget/` holds the manifest templates. Fill in the version and the hashes from the release's `.sha256` files, then submit them to `microsoft/winget-pkgs`.

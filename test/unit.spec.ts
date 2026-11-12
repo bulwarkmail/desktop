@@ -9,7 +9,7 @@ import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { expect, test } from '@playwright/test';
 import { fingerprintOf, generateCertificate } from '../src/main/cert';
-import { isJmapProxyPath, isSsoStart, looksLikeProviderLogout } from '../src/main/navigation-rules';
+import { externalOpenAllowed, isJmapProxyPath, isSsoStart, looksLikeProviderLogout, parse, shownHost, SHOWN_HOST_MAX, UNCLICKED_OPEN_MAX, UNCLICKED_OPEN_MS } from '../src/main/navigation-rules';
 import { isPrivateAddress, isPrivateHost, isRealHostname, serverOrigin } from '../src/main/server-address';
 import { CorsInjector } from '../src/main/cors';
 import { pluginFacts, pluginPrompt, type PromptText } from '../src/main/plugin-prompt';
@@ -188,6 +188,86 @@ test.describe('navigation rules', () => {
     expect(looksLikeProviderLogout(new URL('https://idp.example/x?id_token_hint=abc'))).toBe(true);
     expect(looksLikeProviderLogout(new URL('https://idp.example/end_session'))).toBe(true);
     expect(looksLikeProviderLogout(new URL('https://example.com/about'))).toBe(false);
+  });
+
+  test('which addresses go to another program, with a click and without one', () => {
+    const decide = (url: string, clicked: boolean, recent = 0) => externalOpenAllowed(parse(url), clicked, recent);
+    // Web addresses: on a click, and without one only while the app's last ten seconds for the server hold fewer than five.
+    for (const url of ['https://example.org/', 'http://example.org/']) {
+      expect(decide(url, true, UNCLICKED_OPEN_MAX), url).toBe(true);
+      expect(decide(url, false, 0), url).toBe(true);
+      expect(decide(url, false, UNCLICKED_OPEN_MAX - 1), url).toBe(true);
+      expect(decide(url, false, UNCLICKED_OPEN_MAX), url).toBe(false);
+    }
+    expect(UNCLICKED_OPEN_MAX).toBe(5);
+    expect(UNCLICKED_OPEN_MS).toBe(10_000);
+    // Mail, phone, text and calendar: on a click only, upper case as lower.
+    for (const url of ['mailto:a@example.org', 'MAILTO:a@example.org', 'tel:+4912345', 'sms:+4912345', 'webcal://example.org/c.ics']) {
+      expect(decide(url, true), url).toBe(true);
+      expect(decide(url, false), url).toBe(false);
+    }
+    // Everything else never, nor an address with a user name or password in it.
+    for (const url of ['xmpp:a@example.org', 'file:///C:/x', 'ms-msdt:x', 'search-ms:x', 'bulwark://x', 'javascript:1', 'https://user@example.org/', 'https://user:secret@example.org/', 'webcal://user@example.org/c.ics', 'not a url']) {
+      expect(decide(url, true), url).toBe(false);
+      expect(decide(url, false), url).toBe(false);
+    }
+  });
+
+  test('schemes around the list never go to another program, click or not', () => {
+    for (const url of [
+      'webcals://example.org/c.ics', 'ms-settings:privacy', 'ms-msdt:/id x', 'search-ms:query=x', 'ms-word:ofe|u|https://example.org/x.docx',
+      'file:///C:/Windows/System32/calc.exe', 'file://server/share/x', 'smb://server/share', '\\\\server\\share\\x.lnk', '//server/share',
+      'javascript:alert(1)', 'data:text/html,<script>1</script>', 'vbscript:msgbox(1)', 'blob:https://example.org/1', 'about:blank',
+      'tel :+4912345', 'tel%3A+4912345', 'xmpp:a@example.org', 'bulwark://open', 'callto:+4912345', 'facetime:a@example.org', 'skype:a?call',
+      'mailto', 'mailto//a@example.org', 'view-source:https://example.org', 'chrome://settings', 'ftp://example.org/x',
+    ]) {
+      expect.soft(externalOpenAllowed(parse(url), true, 0), `${url} with a click`).toBe(false);
+      expect.soft(externalOpenAllowed(parse(url), false, 0), `${url} without`).toBe(false);
+    }
+  });
+
+  test('odd spellings of mail, phone, text and calendar addresses need the click all the same', () => {
+    for (const url of ['MAILTO:a@example.org', 'MailTo:a@example.org?subject=x', ' mailto:a@example.org', 'mail\tto:a@example.org', 'TEL:+4912345', 'tel:+49 123 45', 'sms:+4912345?body=x', 'WEBCAL://Example.org/c.ics', 'webcal:example.org/c.ics']) {
+      expect.soft(externalOpenAllowed(parse(url), false, 0), `${url} without a click`).toBe(false);
+      expect.soft(externalOpenAllowed(parse(url), true, 0), `${url} with a click`).toBe(true);
+    }
+  });
+
+  test('a user name or a password in any address keeps it in the app, click or not', () => {
+    for (const url of ['https://user@example.org/', 'https://user:pw@example.org/', 'http://:pw@example.org/', 'webcal://user@example.org/c.ics', 'https://example.org@evil.example/']) {
+      expect.soft(externalOpenAllowed(parse(url), true, 0), `${url} with a click`).toBe(false);
+      expect.soft(externalOpenAllowed(parse(url), false, 0), `${url} without`).toBe(false);
+    }
+    // Percent-encoded, it is no user name: one odd host, which the URL parser refuses or keeps as a host.
+    const encoded = parse('https://example.org%40evil.example/');
+    expect(encoded === null || encoded.username === '').toBe(true);
+  });
+
+  test('the limit: the fifth web address without a click opens, the sixth and any later one do not', () => {
+    for (const recent of [0, 1, 4]) expect(externalOpenAllowed(parse('https://example.org/'), false, recent)).toBe(true);
+    for (const recent of [5, 6, 1000, Number.MAX_SAFE_INTEGER]) expect(externalOpenAllowed(parse('https://example.org/'), false, recent)).toBe(false);
+    expect(externalOpenAllowed(parse('https://example.org/'), false, Number.NaN), 'a count that is no number').toBe(false);
+    expect(externalOpenAllowed(parse('https://example.org/'), true, 1000)).toBe(true);
+  });
+
+  test('a question names a long server by the end that says whose it is, shortened in the middle of the left-hand part', () => {
+    // As short as a question needs: whole.
+    for (const host of ['mail.example.org', 'localhost:3947', 'xn--pple-43d.localhost:3947', '192.168.1.10:8080', '[2001:db8::1]:8443']) expect(shownHost(host)).toBe(host);
+    // A name that starts like a trusted one and ends in another domain.
+    const long = `mail.example.com.${'a'.repeat(60)}.${'b'.repeat(60)}.${'c'.repeat(60)}.evil-domain.localhost:3947`;
+    const shown = shownHost(long);
+    expect(shown.length).toBeLessThanOrEqual(SHOWN_HOST_MAX);
+    expect(shown.endsWith('.evil-domain.localhost:3947'), shown).toBe(true);
+    expect(shown.startsWith('mail.'), shown).toBe(true);
+    expect(shown.split('…')).toHaveLength(2);
+    // Three labels under a country code with a short second level, punycode as it is.
+    expect(shownHost(`${'x'.repeat(70)}.mail.example.co.uk`).endsWith('.example.co.uk')).toBe(true);
+    expect(shownHost(`${'a'.repeat(70)}.xn--pple-43d.com`).endsWith('.xn--pple-43d.com')).toBe(true);
+    // An end longer than the room there is: all of it, and nothing of the left.
+    const wide = `www.${'c'.repeat(63)}.com:8443`;
+    expect(shownHost(wide)).toBe(`….${'c'.repeat(63)}.com:8443`);
+    // Whatever the length on the left, the end stays whole.
+    for (let n = 1; n <= 200; n += 37) expect(shownHost(`${'q'.repeat(n)}.mail.evil.example`).endsWith('.evil.example')).toBe(true);
   });
 });
 
