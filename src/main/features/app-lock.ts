@@ -23,7 +23,7 @@
  */
 
 import { createHmac } from 'node:crypto';
-import { readdirSync, rmSync } from 'node:fs';
+import { readdirSync, rmdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { app, BrowserWindow, powerMonitor, safeStorage, systemPreferences } from 'electron';
 import { CHANNEL, type AppLockStatus, type OsUnlockAnswer, type OsUnlockKind, type PinStepAnswer } from '../../shared/bridge';
@@ -31,6 +31,7 @@ import { appLockGate, appLockSite as siteOf, isSiteFile } from '../app-lock-gate
 import { AppLockHello, HELLO_SALT_BYTES, helloKeyName, removeAllHelloKeys, removeHelloKeyOf, type HelloAnswer, type HelloKeys } from '../app-lock-hello';
 import { fakeHelloKeys } from '../app-lock-hello-fake';
 import { native } from '../native';
+import { removeOwn } from '../remove-tree';
 import { effectivePolicyValue } from '../../shared/policy-schema';
 import { policies } from './policies';
 import { randomSecret, SecretStore } from '../secrets';
@@ -86,7 +87,7 @@ addWipeStep(async ({ origin }) => {
   const folder = path.join(userData, 'app-lock');
   if (origin === null) {
     await removeAllHelloKeys(folder, helloKeys());
-    rmSync(folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    removeOwn(folder, { root: userData });
     appLockGate.forget();
     return;
   }
@@ -101,9 +102,9 @@ addWipeStep(async ({ origin }) => {
   for (const name of names.filter((entry) => isSiteFile(entry, site))) rmSync(path.join(folder, name), { force: true });
   if (appLockGate.isFor(userData, origin)) appLockGate.forget();
   try {
-    if (readdirSync(folder).length === 0) rmSync(folder, { recursive: true, force: true });
+    if (readdirSync(folder).length === 0) rmdirSync(folder);
   } catch {
-    // Gone already.
+    // Gone already, or not empty after all.
   }
 });
 

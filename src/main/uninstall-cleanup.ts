@@ -16,6 +16,7 @@ import { DRIVES_KEY, registryLetterLabels } from './files/drive-letter-label';
 import { SEND_TO_NAME, windowsRegistrationKeys } from './features/os-rules';
 import type { NativeFilesModule, Registry } from './native-loader';
 import { readKey, stringOf, valueOf } from './registry-values';
+import { removeOwn } from './remove-tree';
 
 export const UNINSTALL_CLEANUP_SWITCH = '--uninstall-cleanup';
 
@@ -83,12 +84,13 @@ function removeIfEmpty(folder: string): void {
  */
 export function removeLocalFolders(local: string): void {
   const own = path.join(local, 'Bulwark');
-  rmSync(path.join(own, 'os-files'), { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+  // Never through a link a user or program put there (remove-tree.ts).
+  removeOwn(path.join(own, 'os-files'), { root: local });
   removeIfEmpty(path.join(own, 'edit-files'));
   removeIfEmpty(path.join(own, 'files-sync', 'state'));
   removeIfEmpty(path.join(own, 'files-sync'));
   removeIfEmpty(own);
-  rmSync(path.join(local, 'bulwark-desktop-updater'), { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+  removeOwn(path.join(local, 'bulwark-desktop-updater'), { root: local });
 }
 
 /** The Files drive of the profile being left behind, as features/files-drive.ts names it. */

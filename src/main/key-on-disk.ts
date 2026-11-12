@@ -19,8 +19,9 @@
  * none of this runs there. No Electron here, so tests can load it.
  */
 
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { removeOwn } from './remove-tree';
 
 /** A run of the app that only gets the key onto the disk, by quitting cleanly. */
 export const KEY_INIT_SWITCH = '--bulwark-init-key';
@@ -109,7 +110,7 @@ function putKeyBack(userData: string, key: string): void {
  */
 export function keyOpens(userData: string, key: string, runCheck: () => void): boolean {
   const folder = path.join(userData, KEY_CHECK_FOLDER);
-  const clear = () => rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  const clear = () => removeOwn(folder, { root: userData, tries: 6, delayMs: 200 });
   try {
     clear();
     durableWrite(path.join(folder, 'Local State'), JSON.stringify({ os_crypt: { encrypted_key: key, audit_enabled: true } }));

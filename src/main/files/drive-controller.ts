@@ -32,7 +32,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, watch, type BigIntStats, type FSWatcher } from 'node:fs';
+import { lstatSync, mkdirSync, readdirSync, realpathSync, watch, type BigIntStats, type FSWatcher } from 'node:fs';
 import path from 'node:path';
 import type {
   FilesDriveLetterState,
@@ -74,6 +74,7 @@ import {
 } from './drive-places';
 import { splitRelative } from './paths';
 import type { RegisteredRoot } from './registry';
+import { removeOwn } from '../remove-tree';
 import { wipeCovers } from '../wipe-scope';
 
 export type DisableReason = 'user' | 'signed-out' | 'suspended' | 'wipe' | 'refused';
@@ -658,11 +659,10 @@ export class DriveController {
   private removeFolder(dir: string): void {
     const base = this.base();
     if (!inside(base, dir) || path.win32.relative(base.toLowerCase(), dir.toLowerCase()) === '') return;
-    const facts = lstatOrNull(dir);
-    if (!facts) return;
+    if (!lstatOrNull(dir)) return;
     try {
-      // A link is removed, never what it points to.
-      rmSync(dir, { recursive: !facts.isSymbolicLink(), force: true, maxRetries: 3, retryDelay: 200 });
+      // A link is removed, never what it points to, here or anywhere below (remove-tree.ts).
+      removeOwn(dir, { root: base });
     } catch (error) {
       this.warn(`The drive's folder couldn't be removed: ${(error as Error).message}`);
     }

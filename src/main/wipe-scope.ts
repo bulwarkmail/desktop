@@ -7,9 +7,10 @@
  * policy, which the machine's administrator sets, takes the whole profile.
  */
 
-import { readdirSync, rmSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import path from 'node:path';
 import { APP_ORIGIN } from '../server/protocol';
+import { isLinkPath, removeOwn } from './remove-tree';
 
 export type WipeReason = 'policy-nonce' | 'remote' | 'settings' | 'connection';
 
@@ -65,12 +66,15 @@ export function partitionLeftovers(entries: readonly string[], keepLocalStorage:
   return keepLocalStorage ? entries.filter((name) => name.toLowerCase() !== 'local storage') : [...entries];
 }
 
-/** True when nothing that should go is left. A file still held (in use, by another program) leaves it for the next try. */
+/**
+ * True when nothing that should go is left. A file still held (in use, by another program) leaves
+ * it for the next try. Never through a link (remove-tree.ts): a folder that is itself a link goes
+ * as the link, and what it points at stays.
+ */
 export function removePartitionFolder(folder: string, keepLocalStorage: boolean): boolean {
-  const remove = (target: string) => rmSync(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
   try {
-    if (!keepLocalStorage) {
-      remove(folder);
+    if (!keepLocalStorage || isLinkPath(folder)) {
+      removeOwn(folder);
       return true;
     }
     let names: string[];
@@ -79,7 +83,7 @@ export function removePartitionFolder(folder: string, keepLocalStorage: boolean)
     } catch {
       return true;
     }
-    for (const name of partitionLeftovers(names, true)) remove(path.join(folder, name));
+    for (const name of partitionLeftovers(names, true)) removeOwn(path.join(folder, name), { root: folder });
     return true;
   } catch (error) {
     console.warn(`A wiped partition's folder could not be removed yet, the next start tries again (${folder}): ${(error as Error).message}`);

@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { APP_ORIGIN } from '../server/protocol';
+import { removeOwn } from './remove-tree';
 
 export interface CrashLimits {
   count: number;
@@ -60,7 +61,7 @@ export function listCrashFiles(dir: string): CrashFile[] {
 
 function removeCrash(dir: string, crash: CrashFile): void {
   rmSync(crash.file, { force: true });
-  rmSync(path.join(dir, 'attachments', crash.id), { recursive: true, force: true });
+  removeOwn(path.join(dir, 'attachments', crash.id), { root: dir });
 }
 
 /** Keeps the newest within the limits and removes the rest. Returns how many went. */

@@ -4,10 +4,11 @@
  * message box; `show` is a window of the app's own (dialog-window.ts).
  */
 
-import { mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { app, clipboard, powerMonitor } from 'electron';
+import { removeOwn } from '../remove-tree';
 import { addWipeStep } from './local-wipe';
 import { CHANNEL, type ConfirmOptions } from '../../shared/bridge';
 import { dialogWindows } from '../dialog-window';
@@ -39,7 +40,7 @@ function clipboardFolder(): string {
 
 function emptyClipboardFolder(): void {
   try {
-    for (const entry of readdirSync(clipboardFolder())) rmSync(path.join(clipboardFolder(), entry), { recursive: true, force: true });
+    for (const entry of readdirSync(clipboardFolder())) removeOwn(path.join(clipboardFolder(), entry), { root: clipboardFolder() });
   } catch {
     // Nothing there yet.
   }
@@ -124,7 +125,13 @@ export const dialogsFeature: Feature = {
       mkdirSync(folder, { recursive: true });
       const file = path.join(folder, safeDragFileName(name));
       await writeMarkedFile(file, bytes);
-      setTimeout(() => rmSync(folder, { recursive: true, force: true }), CLIPBOARD_FILE_MS).unref?.();
+      setTimeout(() => {
+        try {
+          removeOwn(folder, { root: clipboardFolder() });
+        } catch {
+          // Held by a program: the folder is emptied at the next quit or start.
+        }
+      }, CLIPBOARD_FILE_MS).unref?.();
       return putFileOnClipboard(file);
     });
   },

@@ -18,7 +18,6 @@
  * file in it: they were the user's. Only main's own temporary files there go.
  */
 
-import { rmSync } from 'node:fs';
 import { lstat, realpath, statfs } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -36,6 +35,7 @@ import { FolderRoots } from '../files/folder-roots';
 import { FolderRootStore, MAX_STATE_CHARS, validRootId } from '../files/store';
 import { RootWatcher } from '../files/watcher';
 import { isInstalledBuild } from '../installed';
+import { removeOwn } from '../remove-tree';
 import { fill, strings } from '../strings';
 import { takeUserGesture, watchUserGestures } from '../user-gesture';
 import { addWipeStep } from './local-wipe';
@@ -74,7 +74,7 @@ let running: { wipe: (origin: string | null, account: string | null) => Promise<
 // record names the page it was added from: a server's wipe takes those of its page.
 addWipeStep(async ({ origin, account }) => {
   if (running) await running.wipe(origin, account);
-  else if (origin === null && account === null) rmSync(filesDataFolder(), { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+  else if (origin === null && account === null) removeOwn(filesDataFolder());
   else if (account === null) await new FolderRootStore(filesDataFolder(), makeRootPrivate).removeWhere((stored) => stored.origin === origin);
 }, { perAccount: true });
 

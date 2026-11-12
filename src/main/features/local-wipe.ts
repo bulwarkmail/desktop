@@ -33,11 +33,12 @@
  * has opened in this run, as at a policy's wipe at the start, goes at once.
  */
 
-import { readdirSync, rmSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import path from 'node:path';
 import { BrowserWindow, session as electronSession, type Session } from 'electron';
 import { APP_ORIGIN } from '../../server/protocol';
 import { APP_PARTITION, instancePartition } from '../app-session';
+import { isLinkPath, removeOwn } from '../remove-tree';
 import type { StateFile } from '../state';
 import { partitionFolder, settlePendingRemovals, urlOfOrigin, wipeCovers, type WipeReason, type WipeScope } from '../wipe-scope';
 
@@ -324,7 +325,7 @@ export async function runLocalWipe(reason: WipeReason, userData: string, state: 
   // No session has these open, and none may: see knownPartitions.
   for (const folder of unnotedPartitionFolders(userData, state)) {
     try {
-      rmSync(folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      removeOwn(folder);
     } catch (error) {
       console.error(`Wiping ${folder} failed:`, error);
       failed.push(folder);
@@ -336,7 +337,7 @@ export async function runLocalWipe(reason: WipeReason, userData: string, state: 
     const folder = partitionFolder(userData, partition);
     if (folder && !opened.has(partition)) {
       try {
-        rmSync(folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+        removeOwn(folder);
         removed.push(partition);
         continue;
       } catch (error) {
@@ -372,7 +373,7 @@ export async function clearStoreFiles(userData: string, state: StateFile, except
   const failed: string[] = [];
   for (const folder of unnotedPartitionFolders(userData, state)) {
     try {
-      rmSync(path.join(folder, 'File System'), { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      if (!isLinkPath(folder)) removeOwn(path.join(folder, 'File System'), { root: folder });
     } catch (error) {
       console.error(`Clearing ${folder} failed:`, error);
       failed.push(folder);

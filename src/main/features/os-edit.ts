@@ -46,6 +46,7 @@ import { allowEditExtensionForTest, EDIT_CHANGED_KEEP_MS, EDIT_CHANGED_MAX_MS, E
 import { strings } from '../strings';
 import { native } from '../native';
 import { makeFolderPrivate } from '../private-folder';
+import { isLinkPath, removeOwn } from '../remove-tree';
 import { takeUserGesture, watchUserGestures } from '../user-gesture';
 import { addWipeStep } from './local-wipe';
 import type { OsHub } from './os-hub';
@@ -209,11 +210,11 @@ function readRecords(folder: string): SessionRecord[] {
 /** Deletes a folder, and failing that at least what says what it was. */
 function removeFolderNow(folder: string): boolean {
   try {
-    rmSync(folder, { recursive: true, force: true });
+    removeOwn(folder, { tries: 1 });
     return true;
   } catch {
     try {
-      for (const name of readdirSync(folder)) if (RECORD_NAME.test(name)) rmSync(path.join(folder, name), { force: true });
+      if (!isLinkPath(folder)) for (const name of readdirSync(folder)) if (RECORD_NAME.test(name)) rmSync(path.join(folder, name), { force: true });
     } catch {
       // The next try.
     }
