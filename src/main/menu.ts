@@ -16,14 +16,15 @@
  * with "Always show the menu bar" (`barMenus`, `runBarItem`). Its controls shrink to
  * that row while it's there, as in a native window with a menu bar. A line that hands the
  * page what's on the clipboard is not the page's to run (`pageBarMayRun`): its menu opens
- * as the OS's own from that row (`popupBarMenu`).
+ * only as the OS's own, on the user's Alt and its letter (`showBar`), never when the page
+ * asks for it.
  */
 
 import { app, BrowserWindow, Menu, shell, type MenuItem, type MenuItemConstructorOptions } from 'electron';
 import { CHANNEL, type MenuBarEntry, type MenuBarEvent, type MenuBarItem, type MenuBarMenu, type MenuBarReport, type MenuState } from '../shared/bridge';
 import { assignMnemonics, barItemsOf, enabledWhileLocked, findBarItem, holdsOsMenuLine, pageBarMayRun, tidySeparators, windowMenuNames, type BarSourceItem } from './menu-text';
 import { strings } from './strings';
-import { noteUserGesture, takePick, takePress } from './user-gesture';
+import { noteUserGesture, takePick } from './user-gesture';
 import type { WindowManager } from './windows';
 
 export interface MenuHooks {
@@ -62,9 +63,6 @@ const MAIN_WINDOW_COMMANDS = new Set(['file.newEvent', 'file.newContact', 'file.
 
 /** The hidden line that takes Ctrl+F off a Mac. */
 const FIND_KEY_ID = 'edit.forwardOrSearch';
-
-/** From Alt and a menu's letter, as main saw the keys, to the page asking for that menu (`popupBarMenu`). */
-const ASKED_OPEN_LIFE_MS = 1_000;
 
 /** Commands whose page action opens a file picker, which needs a user gesture in the page. */
 // Save as… asks main for its dialog (os-save-open.ts), which wants a gesture of main's own as well.
@@ -172,7 +170,6 @@ export class MenuController {
       this.stateByWindow.delete(window);
       this.barReporting.delete(window);
       this.barShown.delete(window);
-      this.askedToOpen.delete(window);
       this.applyState();
     });
     windows.on('changed', (list) => {
@@ -731,17 +728,20 @@ export class MenuController {
 
   /**
    * A menu of the bar as the OS draws it, where the page says its name is (CSS pixels). A menu
-   * with a line the page's bar may not run (`holdsOsMenuLine`) opens only for the user, and
-   * main says where: see `ownPlaceFor`.
+   * with a line the page's bar may not run (`holdsOsMenuLine`) never opens here, whatever input
+   * came before the call: the page would pick the moment it comes up, and with it what the
+   * user's next key or click lands on. Main opens that menu itself, on Alt and its letter
+   * (`openOwnMenu`). The call has no answer, whether the menu opened or not.
    */
   popupBarMenu(window: BrowserWindow, id: string, x: number, y: number): void {
     const found = this.barItems.find(({ entry }) => entry.id === id);
-    if (!found?.item.submenu) return;
+    if (!found?.item.submenu || holdsOsMenuLine(found.item.submenu.items as unknown as BarSourceItem[])) return;
     const scale = window.webContents.getZoomFactor();
-    let place: { x: number; y: number } | null = { x: Math.round(x * scale), y: Math.round(y * scale) };
-    if (holdsOsMenuLine(found.item.submenu.items as unknown as BarSourceItem[])) place = this.ownPlaceFor(window, id, place.x);
-    if (!place) return;
-    found.item.submenu.popup({
+    this.popupOsMenu(window, found.item.submenu, { x: Math.round(x * scale), y: Math.round(y * scale) });
+  }
+
+  private popupOsMenu(window: BrowserWindow, menu: Menu, place: { x: number; y: number }): void {
+    menu.popup({
       window,
       ...place,
       // A bar that hides behind Alt goes when its menu does.
@@ -751,30 +751,27 @@ export class MenuController {
     });
   }
 
-  /** The menu main last asked a window's page to open, on Alt and the menu's letter, and when. */
-  private readonly askedToOpen = new WeakMap<BrowserWindow, { id: string; at: number }>();
+  /**
+   * Alt and the letter of a menu with a line only the OS's menu may run, as main read the keys
+   * (window-input.ts, from `before-input-event`, which no script in the page reaches). Main
+   * opens that menu as the OS's own right then, where it chooses (`ownPlaceFor`), and doesn't
+   * ask the page's bar to open it. Whether it did.
+   */
+  private openOwnMenu(window: BrowserWindow, id: string): boolean {
+    const found = this.barItems.find(({ entry }) => entry.id === id);
+    if (!found?.item.submenu || !holdsOsMenuLine(found.item.submenu.items as unknown as BarSourceItem[])) return false;
+    this.popupOsMenu(window, found.item.submenu, this.ownPlaceFor(window));
+    return true;
+  }
 
   /**
-   * Where a menu the page asks for opens when the place is not the page's to say, in the
-   * window's pixels, or null when it doesn't open. It opens for a press of the left button in
-   * the window's top row, where a menu bar is, as main saw it a moment ago, or for Alt and the
-   * menu's letter. It drops from the bottom of that row, at the press, so the pointer is never
-   * on one of its lines when it comes up. After Alt and a letter there's no press: the page
-   * says how far along the row its name is, and no more.
+   * Where main opens a menu of its own accord, in the window's pixels: at the window's left
+   * edge, from the bottom of its top row (the page's bar as reported, never more than the
+   * title bar's height times the zoom). The page has no say in the place, and none in the
+   * moment: that is the user's key. The pointer can be anywhere, over one of its lines too.
    */
-  private ownPlaceFor(window: BrowserWindow, id: string, wantedX: number): { x: number; y: number } | null {
-    const windows = this.windows;
-    if (!windows) return null;
-    const row = windows.overlayHeightOf(window);
-    const asked = this.askedToOpen.get(window);
-    this.askedToOpen.delete(window);
-    const press = takePress(window.webContents);
-    if (press && press.y >= 0 && press.y < row) return { x: Math.round(press.x), y: row };
-    if (asked && asked.id === id && Date.now() - asked.at <= ASKED_OPEN_LIFE_MS) {
-      const { width } = window.getContentBounds();
-      return { x: Number.isFinite(wantedX) ? Math.min(Math.max(wantedX, 0), width) : 0, y: row };
-    }
-    return null;
+  private ownPlaceFor(window: BrowserWindow): { x: number; y: number } {
+    return { x: 0, y: this.windows?.overlayHeightOf(window) ?? 0 };
   }
 
   /** Windows whose bar has the keys: Alt was pressed there. */
@@ -791,11 +788,15 @@ export class MenuController {
     return this.barReporting.has(window);
   }
 
-  /** Main's own word to the page's bar: Alt, Alt and a menu's letter, Escape, the focus gone. */
+  /**
+   * Main's own word to the page's bar: Alt, Alt and a menu's letter, Escape, the focus gone.
+   * Alt and the letter of a menu only the OS's menu may open doesn't go to the page: main
+   * opens that menu itself (`openOwnMenu`).
+   */
   showBar(window: BrowserWindow, event: MenuBarEvent): void {
+    if (event.visible && event.open && this.openOwnMenu(window, event.open)) return;
     if (event.visible) this.barShown.add(window);
     else this.barShown.delete(window);
-    if (event.visible && event.open) this.askedToOpen.set(window, { id: event.open, at: Date.now() });
     window.webContents.send(CHANNEL.menuBarEvent, { ...event, pinned: this.barPinned() });
   }
 

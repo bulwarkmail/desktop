@@ -190,6 +190,69 @@ test.describe('the pure parts', () => {
     expect(holdsOsMenuLine([menu[0], menu[2]])).toBe(false);
   });
 
+  test('more spellings of a line\'s key name nothing either: other digits, empty parts, a trailing slash, a huge index, a null byte', () => {
+    const plain = (label: string, role?: string): BarSourceItem => ({ label, type: 'normal', enabled: true, visible: true, checked: false, ...(role ? { role } : {}) });
+    const menus: BarSourceItem[] = [
+      { ...plain('File'), type: 'submenu', submenu: { items: [plain('New message')] } },
+      { ...plain('Edit'), type: 'submenu', submenu: { items: [plain('Undo', 'undo'), plain('Redo', 'redo'), plain('Cut', 'cut'), plain('Copy', 'copy'), plain('Paste', 'paste'), plain('Select all', 'selectAll')] } },
+    ];
+    const spellings = ['１/４', '1/٤', '1//4', '/1/4', '1/4/', '1/4\u0000', '1/4\r', '1/-0', '-0/4', '1/4/0', '0001/4', '1/4.0e0', '1/00000000000004', '1/9999999999', '1 /4', '1/ 4', '1/4 '];
+    expect(spellings.filter((key) => findBarItem(menus, key, 'Paste') !== null)).toEqual([]);
+  });
+
+  test('Paste and its variants are never the page bar\'s, in any case and however deep, and a menu that has one is known', () => {
+    const line = (label: string, extra: Partial<BarSourceItem> = {}): BarSourceItem => ({ label, type: 'normal', enabled: true, visible: true, checked: false, ...extra });
+    const sub = (label: string, items: BarSourceItem[]): BarSourceItem => line(label, { type: 'submenu', submenu: { items } });
+    for (const role of ['paste', 'Paste', 'PASTE', 'pasteAndMatchStyle', 'PasteAndMatchStyle', 'pasteandmatchstyle', 'PASTEANDMATCHSTYLE']) {
+      expect.soft(pageBarMayRun({ role }), role).toBe(false);
+    }
+    const nested = [sub('More', [sub('Deeper', [line('Paste', { role: 'paste' })])]), line('Other')];
+    expect(holdsOsMenuLine(nested), 'Paste two submenus down').toBe(true);
+    const drawn = barItemsOf(nested, '3');
+    expect(drawn[0].items![0].items![0]).toMatchObject({ label: 'Paste', enabled: false });
+    expect(drawn[0].enabled, 'the submenu itself still opens').toBe(true);
+    expect(holdsOsMenuLine([line('New message'), line('Zoom in'), line('Close', { role: 'close' }), line('Exit', { role: 'quit' })]), 'a menu with no such line').toBe(false);
+  });
+
+  test('every role Electron has that is not on the list is refused, in any case; a line with no role is the app\'s own', () => {
+    // Electron's roles (MenuItem role in its docs), and a few it doesn't have.
+    const electronRoles = ['undo', 'redo', 'cut', 'copy', 'paste', 'pasteAndMatchStyle', 'delete', 'selectAll', 'reload', 'forceReload', 'toggleDevTools',
+      'resetZoom', 'zoomIn', 'zoomOut', 'toggleSpellChecker', 'togglefullscreen', 'window', 'minimize', 'close', 'help', 'about', 'services', 'hide',
+      'hideOthers', 'unhide', 'quit', 'showSubstitutions', 'toggleSmartQuotes', 'toggleSmartDashes', 'toggleTextReplacement', 'startSpeaking',
+      'stopSpeaking', 'zoom', 'front', 'appMenu', 'fileMenu', 'editMenu', 'viewMenu', 'shareMenu', 'recentDocuments', 'toggleTabBar',
+      'selectNextTab', 'selectPreviousTab', 'showAllTabs', 'mergeAllWindows', 'clearRecentDocuments', 'moveTabToNewWindow', 'windowMenu',
+      'showDefinitionForSelection'];
+    const allowed = new Set(['undo', 'redo', 'cut', 'copy', 'selectall', 'togglefullscreen', 'close', 'quit', 'about']);
+    const wrong: string[] = [];
+    for (const role of [...electronRoles, 'futureRole', 'paste ', ' undo', 'undo\u0000']) {
+      for (const spelled of [role, role.toUpperCase(), role.toLowerCase()]) {
+        const want = allowed.has(spelled.toLowerCase());
+        if (pageBarMayRun({ role: spelled }) !== want) wrong.push(`${spelled}: ${!want}`);
+      }
+    }
+    expect(wrong).toEqual([]);
+    expect(pageBarMayRun({}), 'no role').toBe(true);
+    expect(pageBarMayRun({ role: null }), 'role null').toBe(true);
+    expect(pageBarMayRun({ role: '' }), 'role empty').toBe(true);
+  });
+
+  test('a role reached through a submenu is found by its key and still refused, and greyed in the bar', () => {
+    const line = (label: string, role?: string): BarSourceItem => ({ label, type: 'normal', enabled: true, visible: true, checked: false, ...(role ? { role } : {}) });
+    const sub = (label: string, items: BarSourceItem[]): BarSourceItem => ({ ...line(label), type: 'submenu', submenu: { items } });
+    const menus: BarSourceItem[] = [
+      sub('File', [line('New message'), sub('Import', [line('Mail'), line('Reload', 'reload'), line('Tools', 'ToggleDevTools')])]),
+      // The Develop menu the app adds when developer tools are on: no id, so not in the bar's list, but reachable by its place.
+      sub('Develop', [line('Reload', 'reload'), line('Toggle Developer Tools', 'toggleDevTools')]),
+    ];
+    for (const [key, label] of [['0/1/1', 'Reload'], ['0/1/2', 'Tools'], ['1/0', 'Reload'], ['1/1', 'Toggle Developer Tools']]) {
+      const found = findBarItem(menus, key, label);
+      expect.soft(found?.label, `${key} is found`).toBe(label);
+      expect.soft(found ? pageBarMayRun(found) : null, `${key} (${found?.role}) may not run`).toBe(false);
+    }
+    const drawn = barItemsOf(menus[0].submenu!.items, '0');
+    expect(drawn[1].items!.map((item) => [item.label, item.enabled])).toEqual([['Mail', true], ['Reload', false], ['Tools', false]]);
+  });
+
   test('a label reads as text, with its marked letter', () => {
     expect(labelParts('&File')).toEqual({ text: 'File', mnemonic: 0 });
     expect(labelParts('Fi&le')).toEqual({ text: 'File', mnemonic: 2 });
@@ -2213,23 +2276,155 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
     }
   });
 
-  test('the menu that has Paste opens as the OS\'s own, for a press in the top row or Alt and its letter, where main puts it', async () => {
-    const profile = tempProfile('menu-os-edit');
+  type ShownMenu = { roles: string[]; x?: number; y?: number; pointer: { x: number; y: number; type: string } | null; pressAgo: number | null };
+
+  /**
+   * Native menus stood in for: what one would have shown, where, and where main last saw the
+   * pointer then. Nothing here can click in one. Gives what came up since it was last asked.
+   */
+  async function standInForMenus(app: ElectronApplication): Promise<() => Promise<ShownMenu[]>> {
+    await app.evaluate(({ BrowserWindow, Menu }) => {
+      const g = globalThis as unknown as { __shown: unknown[]; __pointer: { x: number; y: number; type: string } | null; __press: number | null };
+      g.__shown = [];
+      g.__pointer = null;
+      g.__press = null;
+      for (const window of BrowserWindow.getAllWindows()) {
+        window.webContents.on('input-event', (_event, raw) => {
+          const input = raw as unknown as { type: string; x?: number; y?: number; button?: string };
+          if (typeof input.x === 'number' && typeof input.y === 'number' && /^mouse(Move|Down|Up)$/.test(input.type)) g.__pointer = { x: input.x, y: input.y, type: input.type };
+          if (input.type === 'mouseDown' && input.button === 'left') g.__press = Date.now();
+        });
+      }
+      Menu.prototype.popup = function popup(this: { items: { role?: string }[] }, options?: { x?: number; y?: number; callback?: () => void }) {
+        g.__shown.push({
+          roles: this.items.map((item) => item.role ?? ''),
+          x: options?.x,
+          y: options?.y,
+          pointer: g.__pointer ? { ...g.__pointer } : null,
+          pressAgo: g.__press === null ? null : Date.now() - g.__press,
+        });
+        setTimeout(() => options?.callback?.(), 0);
+      } as never;
+    });
+    return () => app.evaluate(() => (globalThis as unknown as { __shown: ShownMenu[] }).__shown.splice(0));
+  }
+
+  /** The instance's page in `mode`, loaded with native menus stood in for from the start. */
+  async function openWatchingMenus(profile: string, mode: InputInstance['mode']): Promise<{ app: ElectronApplication; page: Page; shownMenus: () => Promise<ShownMenu[]> }> {
     const { app, page } = await openInstance(profile, 'idle');
+    const shownMenus = await standInForMenus(app);
+    instance.loot.length = 0;
+    instance.mode = mode;
+    await page.reload();
+    return { app, page, shownMenus };
+  }
+
+  const editMenus = (list: ShownMenu[]) => list.filter((menu) => menu.roles.includes('paste'));
+
+  /** The pointer goes from one place to another in `steps`, `pause` ms apart, as a hand moves it. */
+  async function glide(page: Page, from: [number, number], to: [number, number], steps: number, pause: number): Promise<void> {
+    for (let step = 1; step <= steps; step += 1) {
+      await page.mouse.move(from[0] + ((to[0] - from[0]) * step) / steps, from[1] + ((to[1] - from[1]) * step) / steps);
+      await page.waitForTimeout(pause);
+    }
+  }
+
+  test('a click in the top row, then the pointer goes down the page: the page\'s call brings up no Edit menu under it', async () => {
+    const profile = tempProfile('menu-edit-later');
+    const { app, page, shownMenus } = await openWatchingMenus(profile, 'edit-later');
+    try {
+      await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
+      await page.waitForTimeout(300);
+      // A click on the page's own strip in the top row, then the pointer goes down to the page's
+      // Continue button, as a hand moves it (about 0.4 s).
+      await page.mouse.click(220, 12);
+      await glide(page, [220, 12], [330, 185], 8, 45);
+      await page.waitForTimeout(400);
+      await expect.poll(() => lootOf('asked').length, { timeout: 5_000 }).toBe(1);
+      const shown = editMenus(await shownMenus());
+      for (const menu of shown) {
+        // The menu drops from (x, y): anything below y may be one of its lines.
+        expect.soft(menu.pointer?.y ?? Infinity, `the Edit menu came up at ${menu.x},${menu.y} with the pointer at ${menu.pointer?.x},${menu.pointer?.y}, ${menu.pressAgo} ms after the press`).toBeLessThan(menu.y ?? 0);
+      }
+      expect(shown, 'Edit menus the page\'s call brought up').toEqual([]);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('a drag that starts in the top row: the page\'s call brings up no Edit menu under the pointer', async () => {
+    const profile = tempProfile('menu-edit-drag');
+    const { app, page, shownMenus } = await openWatchingMenus(profile, 'edit-later');
+    try {
+      await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
+      await page.waitForTimeout(300);
+      // The user drags what looks like the title bar down the screen.
+      await page.mouse.move(220, 12);
+      await page.mouse.down();
+      await glide(page, [220, 12], [330, 185], 8, 45);
+      await page.waitForTimeout(200);
+      await expect.poll(() => lootOf('asked').length, { timeout: 5_000 }).toBe(1);
+      const shown = editMenus(await shownMenus());
+      await page.mouse.up();
+      for (const menu of shown) {
+        expect.soft(menu.pointer?.y ?? Infinity, `the Edit menu came up at ${menu.x},${menu.y} with the button down and the pointer at ${menu.pointer?.x},${menu.pointer?.y}`).toBeLessThan(menu.y ?? 0);
+      }
+      expect(shown, 'Edit menus the page\'s call brought up while the button was down').toEqual([]);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('a click into a text field the page drew in the top row leaves no Edit menu up to take the user\'s typing', async () => {
+    const profile = tempProfile('menu-edit-type');
+    const { app, page, shownMenus } = await openWatchingMenus(profile, 'edit-type');
+    try {
+      await expect.poll(() => lootOf('ready').length, { timeout: 30_000 }).toBe(1);
+      await page.waitForTimeout(300);
+      await page.mouse.click(340, 19);
+      await expect.poll(() => lootOf('asked').length, { timeout: 5_000 }).toBe(1);
+      await page.waitForTimeout(300);
+      // The user types the first letter of a word. In a menu the OS shows, a letter that only one
+      // line starts with runs that line: "p" is Paste's in English.
+      await pressKey(page, 'p', 'KeyP', 80, 'p');
+      await page.waitForTimeout(300);
+      expect(editMenus(await shownMenus()), 'an Edit menu came up at the click into the field, before the user typed').toEqual([]);
+      await expect.poll(() => lootOf('typed'), { timeout: 5_000 }).toContain('p');
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('Alt+E, a press in the top row and a click made by a script bring up no menu', async () => {
+    const profile = tempProfile('menu-edit-scripted');
+    const { app, shownMenus } = await openWatchingMenus(profile, 'edit-scripted');
+    try {
+      await expect.poll(() => lootOf('scripted-done').length, { timeout: 30_000 }).toBe(1);
+      await app.evaluate(() => new Promise((resolve) => setTimeout(resolve, 300)));
+      expect(await shownMenus()).toEqual([]);
+    } finally {
+      await app.close().catch(() => {});
+      removeProfile(profile);
+    }
+  });
+
+  test('the menu that has Paste opens as the OS\'s own on the user\'s Alt and its letter, where main puts it, never on the page\'s call; the other menus open where the page asks', async () => {
+    const profile = tempProfile('menu-os-edit');
+    const { app, page, shownMenus } = await openWatchingMenus(profile, 'idle');
     type Line = { key: string; id?: string; label: string; type: string; enabled: boolean; accelerator?: string; items?: Line[] };
-    type Bar = { menus: () => Promise<{ id: string; items: Line[] }[]>; open: (id: string, at: { x: number; y: number }) => void; report: (report: { height: number; active: boolean }) => void };
+    type BarEvent = { visible: boolean; open?: string };
+    type Bar = {
+      menus: () => Promise<{ id: string; items: Line[] }[]>;
+      open: (id: string, at: { x: number; y: number }) => void;
+      report: (report: { height: number; active: boolean }) => void;
+      onEvent: (listener: (event: BarEvent) => void) => void;
+    };
     const bar = { bulwarkDesktop: { menu: { bar: {} as Bar } } };
     try {
-      // What a native menu would have shown, and where: nothing here can click in one.
-      await app.evaluate(({ Menu }) => {
-        const g = globalThis as unknown as { __popups: { roles: string[]; x?: number; y?: number }[] };
-        g.__popups = [];
-        Menu.prototype.popup = function popup(this: { items: { role?: string }[] }, options?: { x?: number; y?: number; callback?: () => void }) {
-          g.__popups.push({ roles: this.items.map((item) => item.role ?? ''), x: options?.x, y: options?.y });
-          setTimeout(() => options?.callback?.(), 0);
-        } as never;
-      });
-      const popups = () => app.evaluate(() => (globalThis as unknown as { __popups: { roles: string[]; x?: number; y?: number }[] }).__popups.splice(0));
+      const places = (list: ShownMenu[]) => list.map(({ x, y }) => ({ x, y }));
       const open = (id: string, x: number, y: number) =>
         page.evaluate(([menu, px, py]) => (window as unknown as typeof bar).bulwarkDesktop.menu.bar.open(menu, { x: px, y: py }), [id, x, y] as const);
       const report = (height: number) => page.evaluate((h) => (window as unknown as typeof bar).bulwarkDesktop.menu.bar.report({ height: h, active: true }), height);
@@ -2237,10 +2432,17 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
       const asked = async () => {
         await open('edit', 600, 500);
         await page.waitForTimeout(300);
-        return popups();
+        return shownMenus();
       };
-      // Past the second a press lasts, so each step stands alone.
+      // Past the second a pick lasts, so each step stands alone.
       const apart = () => page.waitForTimeout(1_200);
+      // What main tells the page's bar.
+      await page.evaluate(() => {
+        const w = window as unknown as typeof bar & { __barEvents: BarEvent[] };
+        w.__barEvents = [];
+        w.bulwarkDesktop.menu.bar.onEvent((event) => w.__barEvents.push(event));
+      });
+      const barEvents = () => page.evaluate(() => (window as unknown as { __barEvents: BarEvent[] }).__barEvents.splice(0));
 
       // The page's bar gets Edit with Paste greyed and its key next to it, the other lines as they are.
       const menus = await page.evaluate(() => (window as unknown as typeof bar).bulwarkDesktop.menu.bar.menus());
@@ -2258,73 +2460,69 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
       // Close and Exit are roles under ids of their own.
       for (const id of ['file.close', 'file.quit']) expect.soft(lines.find((item) => item.id === id)?.enabled, id).toBe(true);
 
-      expect(await asked(), 'no input at all').toEqual([]);
-
+      // The page's call for Edit brings up nothing, whatever input came just before it.
+      expect.soft(await asked(), 'no input at all').toEqual([]);
       await page.mouse.click(400, 500);
-      expect(await asked(), 'a click further down the page').toEqual([]);
+      expect.soft(await asked(), 'a click further down the page').toEqual([]);
       await apart();
-
       await pressKey(page, 'Enter', 'Enter', 13, '\r');
-      expect(await asked(), 'Enter').toEqual([]);
+      expect.soft(await asked(), 'Enter').toEqual([]);
       await pressKey(page, ' ', 'Space', 32, ' ');
-      expect(await asked(), 'Space').toEqual([]);
+      expect.soft(await asked(), 'Space').toEqual([]);
       await apart();
-
-      // No bar reported yet: the top row is the title bar's, 56 pixels at this zoom.
       await page.mouse.click(220, 12);
-      const first = await asked();
-      expect(first, 'a press in the top row').toHaveLength(1);
-      expect(first[0].roles).toContain('paste');
-      expect({ x: first[0].x, y: first[0].y }, 'at the press, below the row: not where the page said').toEqual({ x: 220, y: 56 });
-      expect(await asked(), 'one press opens one menu').toEqual([]);
+      expect.soft(await asked(), 'a press in the top row').toEqual([]);
       await apart();
 
-      await page.mouse.click(220, 12);
-      await apart();
-      expect(await asked(), 'a press more than a second ago').toEqual([]);
-
-      // With a bar of 32 pixels the row is the bar's.
-      await report(32);
-      await page.mouse.click(220, 44);
-      expect(await asked(), 'a press just below a bar of 32 pixels').toEqual([]);
-      await apart();
-      await page.mouse.click(300, 20);
-      const second = await asked();
-      expect(second.map(({ x, y }) => ({ x, y })), 'a press in the bar of 32 pixels').toEqual([{ x: 300, y: 32 }]);
-      await apart();
-
-      // Whatever height the page gives its bar, the row ends where a title bar ends.
-      await report(400);
-      await page.mouse.click(220, 100);
-      expect(await asked(), 'a press at 100 pixels, the bar said to be 400 high').toEqual([]);
-      await apart();
-      await report(32);
-
-      // Alt and the menu's letter, as main sees the keys: the page's place along the row counts, its height doesn't.
+      // Alt and E, as main sees the keys: main opens Edit itself at the window's left edge, below
+      // the top row, and the page's bar is not asked to open it.
       const cdp = await page.context().newCDPSession(page);
       const altAnd = async (key: string, vk: number) => {
         await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Alt', code: 'AltLeft', windowsVirtualKeyCode: 18, nativeVirtualKeyCode: 18, modifiers: 1 });
         await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: `Key${key.toUpperCase()}`, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers: 1 });
         await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: `Key${key.toUpperCase()}`, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers: 1 });
         await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Alt', code: 'AltLeft', windowsVirtualKeyCode: 18, nativeVirtualKeyCode: 18 });
+        await page.waitForTimeout(300);
       };
+      await barEvents();
       await altAnd('e', 69);
-      await open('edit', 45, 500);
-      await page.waitForTimeout(300);
-      expect((await popups()).map(({ x, y }) => ({ x, y })), 'Alt+E').toEqual([{ x: 45, y: 32 }]);
-      await apart();
+      const own = await shownMenus();
+      expect.soft(own.map((menu) => menu.roles.includes('paste')), 'Alt+E: one menu, the one with Paste').toEqual([true]);
+      // No bar reported yet: the top row is the title bar's, 56 pixels at this zoom.
+      expect.soft(places(own), 'Alt+E: at the left edge, below the top row').toEqual([{ x: 0, y: 56 }]);
+      expect.soft((await barEvents()).filter((event) => event.open), 'menus the page\'s bar was asked to open').toEqual([]);
+      expect.soft(await asked(), 'the page\'s call right after Alt+E').toEqual([]);
+      // With a bar of 32 pixels the row is the bar's. Whatever height the page gives its bar, the
+      // row ends where a title bar ends.
+      await report(32);
+      await altAnd('e', 69);
+      expect.soft(places(await shownMenus()), 'Alt+E under a bar of 32 pixels').toEqual([{ x: 0, y: 32 }]);
+      await report(400);
+      await altAnd('e', 69);
+      expect.soft(places(await shownMenus()), 'Alt+E under a bar said to be 400 pixels high').toEqual([{ x: 0, y: 56 }]);
+      await report(32);
+      await barEvents();
+
+      // Alt and another menu's letter: the page's bar is asked to open that menu, as before, and
+      // main opens nothing itself.
       await altAnd('f', 70);
-      expect(await asked(), 'Alt and another menu\'s letter').toEqual([]);
+      expect.soft(await shownMenus(), 'Alt+F').toEqual([]);
+      expect.soft((await barEvents()).map((event) => event.open).filter(Boolean), 'menus the page\'s bar was asked to open').toEqual(['file']);
       await apart();
 
-      // The menus the page's bar may run every line of open as before, where the page says.
+      // The menus the page's bar may run every line of open on its call as before, where the
+      // page says, with no input.
       await open('file', 40, 32);
       await page.waitForTimeout(300);
-      const file = await popups();
-      expect(file.map(({ x, y }) => ({ x, y })), 'File, with no press').toEqual([{ x: 40, y: 32 }]);
+      const file = await shownMenus();
+      expect(places(file), 'File, with no input').toEqual([{ x: 40, y: 32 }]);
       expect(file[0].roles).not.toContain('paste');
+      await open('view', 120, 32);
+      await page.waitForTimeout(300);
+      expect(places(await shownMenus()), 'View, with no input').toEqual([{ x: 120, y: 32 }]);
 
-      // Ctrl+V is still Chromium's own. The page cancels the paste and never looks at what it carries.
+      // Ctrl+V and Shift+Insert are still Chromium's own. The page cancels the paste and never
+      // looks at what it carries.
       await page.evaluate(() => {
         const w = window as unknown as { __pastes: number };
         w.__pastes = 0;
@@ -2333,10 +2531,15 @@ test.describe('the in-window menu bar and the user\'s real input', () => {
           w.__pastes += 1;
         }, true);
       });
+      const pastes = () => page.evaluate(() => (window as unknown as { __pastes: number }).__pastes);
       await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, nativeVirtualKeyCode: 86, modifiers: 2 });
       await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, nativeVirtualKeyCode: 86, modifiers: 2 });
+      await expect.poll(pastes, { timeout: 5_000 }).toBe(1);
+      await page.waitForTimeout(1_200);
+      await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Insert', code: 'Insert', windowsVirtualKeyCode: 45, nativeVirtualKeyCode: 45, modifiers: 8 });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Insert', code: 'Insert', windowsVirtualKeyCode: 45, nativeVirtualKeyCode: 45, modifiers: 8 });
+      await expect.poll(pastes, { timeout: 5_000 }).toBe(2);
       await cdp.detach();
-      await expect.poll(() => page.evaluate(() => (window as unknown as { __pastes: number }).__pastes), { timeout: 5_000 }).toBe(1);
     } finally {
       await app.close().catch(() => {});
       removeProfile(profile);

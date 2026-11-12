@@ -25,7 +25,10 @@ export type InputMode =
   | 'paste-spellings'
   | 'paste-down'
   | 'tap'
-  | 'letter-pick';
+  | 'letter-pick'
+  | 'edit-later'
+  | 'edit-type'
+  | 'edit-scripted';
 
 export interface InputInstance {
   origin: string;
@@ -390,6 +393,76 @@ const PAYLOAD = `
       pad.addEventListener('touchcancel', lifted);
       send('ready', { line: [160, 140], link: [160, 240], pad: [550, 450] });
     })();
+  }
+
+  if (mode === 'edit-later' || mode === 'edit-type' || mode === 'edit-scripted') {
+    // A page that asks main for the Edit menu (menu.bar.open) at moments of its own. Something
+    // of its own in the window's top row, drawn like a title bar with a search field. Only that
+    // a paste reached the page: the event is cancelled and what it carries is never touched.
+    document.addEventListener('paste', (event) => { event.preventDefault(); send('paste-event', true); }, true);
+    const openEdit = (why) => { d.menu.bar.open('edit', { x: 5, y: 5 }); send('asked', why); };
+    const strip = document.createElement('div');
+    strip.id = 'strip';
+    strip.style.cssText = 'position:fixed;left:0;top:0;width:900px;height:40px;background:#e8e8e8;z-index:10';
+    const field = document.createElement('input');
+    field.id = 'top-field';
+    field.placeholder = 'Search mail';
+    field.style.cssText = 'position:absolute;left:180px;top:6px;width:320px;height:26px';
+    strip.appendChild(field);
+    document.body.appendChild(strip);
+
+    if (mode === 'edit-later') {
+      // A press in the top row. The page asks for the Edit menu only once the pointer has gone
+      // down the page, to a button it drew there, within a second of the press.
+      const button = document.createElement('button');
+      button.id = 'continue';
+      button.textContent = 'Continue';
+      button.style.cssText = 'position:fixed;left:230px;top:170px;width:200px;height:30px;z-index:10';
+      document.body.appendChild(button);
+      let pressedAt = 0;
+      let asked = false;
+      window.addEventListener('mousedown', (event) => { if (event.clientY < 40) { pressedAt = performance.now(); asked = false; } }, true);
+      window.addEventListener('mousemove', (event) => {
+        if (!pressedAt || asked) return;
+        const since = performance.now() - pressedAt;
+        if (since < 950 && event.clientY > 150) {
+          asked = true;
+          openEdit({ since: Math.round(since), x: event.clientX, y: event.clientY, buttons: event.buttons });
+        }
+      }, true);
+      send('ready', { button: [330, 185] });
+    }
+
+    if (mode === 'edit-type') {
+      // A click into the search field asks for the Edit menu right away; the user then types.
+      field.addEventListener('mousedown', () => openEdit({ on: 'field' }), true);
+      field.addEventListener('keydown', (event) => send('typed', event.key));
+      send('ready', { field: [340, 19] });
+    }
+
+    if (mode === 'edit-scripted') {
+      // No real input: Alt+E, a press in the top row and a click on the field, each made by a
+      // script, each followed by a call for the Edit menu.
+      (async () => {
+        await sleep(400);
+        const out = {};
+        for (const type of ['keydown', 'keyup']) document.dispatchEvent(new KeyboardEvent(type, { bubbles: true, key: 'Alt', code: 'AltLeft', altKey: type === 'keydown' }));
+        for (const type of ['keydown', 'keypress', 'keyup']) document.dispatchEvent(new KeyboardEvent(type, { bubbles: true, key: 'e', code: 'KeyE', altKey: true, keyCode: 69 }));
+        d.menu.bar.open('edit', { x: 5, y: 5 });
+        out.altE = true;
+        await sleep(300);
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) field.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: 200, clientY: 12, view: window }));
+        d.menu.bar.open('edit', { x: 5, y: 5 });
+        out.mouse = true;
+        await sleep(300);
+        field.click();
+        field.focus();
+        d.menu.bar.open('edit', { x: 5, y: 5 });
+        out.click = true;
+        await sleep(300);
+        send('scripted-done', out);
+      })();
+    }
   }
 
   if (mode === 'key-link') {

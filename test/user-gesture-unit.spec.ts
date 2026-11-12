@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { expect, test } from '@playwright/test';
 import type { Input, InputEvent, MouseInputEvent, WebContents } from 'electron';
-import { takePick, takePress, takeUserGesture, watchUserGestures } from '../src/main/user-gesture';
+import { takePick, takeUserGesture, watchUserGestures } from '../src/main/user-gesture';
 
 /**
  * What counts as the user doing something, as main sees the input reach a window. The events
@@ -32,7 +32,6 @@ function contents() {
     input,
     take: () => takeUserGesture(emitter as unknown as WebContents),
     pick: () => takePick(emitter as unknown as WebContents),
-    press: () => takePress(emitter as unknown as WebContents),
   };
 }
 
@@ -65,20 +64,6 @@ test('a line of a menu the page draws: a click just now picks one line, once it 
   expect(page.take(), 'the click is still a gesture for what the line runs').toBe(true);
 });
 
-test('where the left button went down is kept for a second, once, apart from the pick and the gesture', () => {
-  const page = contents();
-  expect(page.press(), 'no input at all').toBeNull();
-  page.input(mouseEvent('mouseDown', 'left', 210, 14));
-  expect(page.press()).toMatchObject({ x: 210, y: 14 });
-  expect(page.press(), 'one press, taken once').toBeNull();
-  expect(page.take(), 'the gesture is still there').toBe(true);
-  page.input(mouseEvent('mouseDown', 'left', 210, 14));
-  page.input(mouseEvent('mouseUp', 'left', 300, 400));
-  expect(page.press(), 'the place is where it went down, not where it was let go').toMatchObject({ x: 210, y: 14 });
-  page.input(mouseEvent('mouseDown', 'left', 210, 14));
-  expect(later(1_200, page.press), 'a second later is too late').toBeNull();
-});
-
 test('a tap of a finger counts as a left click does: a gesture, and a pick of one line', () => {
   const page = contents();
   // What reaches main for one tap, in this order.
@@ -92,7 +77,23 @@ test('a tap of a finger counts as a left click does: a gesture, and a pick of on
   expect(page.take(), 'once').toBe(false);
   page.input(touchEvent('gestureTap'));
   expect(later(1_200, page.pick), 'a second later is too late').toBeNull();
-  expect(page.press(), 'a tap has no place: it is no press').toBeNull();
+});
+
+test('a double tap is two taps, as a double click is two clicks; a long tap, a two-finger tap, a fling and a pinch are none', () => {
+  const page = contents();
+  page.input(touchEvent('gestureTap'));
+  expect(page.pick()).toMatchObject({ kind: 'click' });
+  page.input(touchEvent('gestureTap'));
+  expect(page.pick(), 'the second tap of a double tap').toMatchObject({ kind: 'click' });
+  expect(page.take()).toBe(true);
+  for (const type of ['gestureDoubleTap', 'gestureLongTap', 'gestureLongPress', 'gestureTwoFingerTap', 'gestureFlingStart', 'gestureFlingCancel',
+    'gesturePinchBegin', 'gesturePinchUpdate', 'gesturePinchEnd', 'gestureScrollBegin', 'gestureScrollUpdate', 'gestureScrollEnd', 'gestureTapCancel',
+    'gestureTapUnconfirmed', 'gestureShowPress', 'gestureTapDown', 'touchStart', 'touchMove', 'touchEnd', 'touchCancel', 'touchScrollStarted',
+    'pointerDown', 'pointerUp', 'pointerMove', 'pointerCancel', 'mouseWheel', 'mouseMove', 'mouseEnter', 'mouseLeave', 'contextMenu', 'GestureTap', 'gesturetap', 'gestureTap ']) {
+    page.input({ type, modifiers: [] } as unknown as InputEvent);
+  }
+  expect(page.pick(), 'none of those picks').toBeNull();
+  expect(page.take(), 'none of those is a gesture').toBe(false);
 });
 
 test('a finger that scrolls, pinches, stays down or brings the menu of a right click taps nothing', () => {
@@ -104,17 +105,6 @@ test('a finger that scrolls, pinches, stays down or brings the menu of a right c
   ] as const) page.input(touchEvent(type));
   expect(page.pick()).toBeNull();
   expect(page.take()).toBe(false);
-  expect(page.press()).toBeNull();
-});
-
-test('a right or middle button, a button let go, and a key are no press', () => {
-  const page = contents();
-  page.input(mouseEvent('mouseDown', 'right', 210, 14));
-  page.input(mouseEvent('mouseDown', 'middle', 210, 14));
-  page.input(mouseEvent('mouseUp', 'left', 210, 14));
-  page.input(keyEvent('rawKeyDown', 'Enter', 'Enter'));
-  page.input(keyEvent('rawKeyDown', ' ', 'Space'));
-  expect(page.press()).toBeNull();
 });
 
 test('Enter, Space and the Enter of the number pad pick as a click does, for a second', () => {

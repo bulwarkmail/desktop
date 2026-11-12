@@ -15,9 +15,7 @@
  * Only that input and a native menu's pick are noted. A page's word, such as which line of
  * its own menu bar was picked, is never one. For that bar main keeps the last pick apart
  * (`takePick`): what it was (a click or tap, Enter or Space, or a letter) and when. One pick
- * runs one line, and the menu decides whether it fits the line the page names. Where the left
- * button last went down is kept too (`takePress`), for a menu that opens only from the
- * window's top row. A tap reaches the browser process without a place, so it is no press.
+ * runs one line, and the menu decides whether it fits the line the page names.
  */
 
 import type { Input, WebContents } from 'electron';
@@ -35,18 +33,9 @@ export interface MenuPick {
   letter?: string;
 }
 
-/** The left button going down in a window: when, and where in the window's pixels, as the input event has it. */
-export interface SeenPress {
-  at: number;
-  x: number;
-  y: number;
-}
-
 const gestures = new WeakMap<WebContents, number>();
 /** The last pick in a window, for `takePick`. */
 const picks = new WeakMap<WebContents, MenuPick>();
-/** The last press of the left button in a window, for `takePress`. */
-const presses = new WeakMap<WebContents, SeenPress>();
 /** Enter, Space, and the keys that choose in a list, by the `key` the input event carries (the DOM's names). */
 const GESTURE_KEYS = new Set(['Enter', ' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
 /** The keys that run the line a menu has selected. */
@@ -56,15 +45,12 @@ const watched = new WeakSet<WebContents>();
 /**
  * What `input-event` hands over. Electron types it as the bare InputEvent; a key's event carries
  * what `Input` describes (`key`, `code`, `isAutoRepeat`, `isComposing`, the modifiers), a mouse
- * event `button` and where it was, `x` and `y`. A touch or a gesture made of touches carries
- * its type and nothing else.
+ * event `button`. A touch or a gesture made of touches carries its type and nothing else.
  */
 type SeenInput = Partial<Pick<Input, 'key' | 'code' | 'isAutoRepeat' | 'isComposing' | 'control' | 'alt' | 'meta'>> & {
   type: string;
   button?: string;
   modifiers?: string[];
-  x?: number;
-  y?: number;
 };
 
 /** A key that went down, not one the OS repeats while it's held. */
@@ -103,17 +89,6 @@ export function takePick(contents: WebContents): MenuPick | null {
   return pick && Date.now() - pick.at <= PICK_LIFE_MS ? pick : null;
 }
 
-/**
- * Where the left button went down in this window in the last second, as the browser process
- * saw it. Taking it spends it. The page has no say in it: it's what tells a click in the
- * window's top row, where a menu bar is, from one anywhere else.
- */
-export function takePress(contents: WebContents): SeenPress | null {
-  const press = presses.get(contents);
-  presses.delete(contents);
-  return press && Date.now() - press.at <= PICK_LIFE_MS ? press : null;
-}
-
 export function watchUserGestures(contents: WebContents): void {
   if (watched.has(contents)) return;
   watched.add(contents);
@@ -126,7 +101,6 @@ export function watchUserGestures(contents: WebContents): void {
     const pressed = key !== null && GESTURE_KEYS.has(key);
     if (clicked || tapped || pressed) noteUserGesture(contents);
     const now = Date.now();
-    if (clicked && typeof input.x === 'number' && typeof input.y === 'number' && Number.isFinite(input.x) && Number.isFinite(input.y)) presses.set(contents, { at: now, x: input.x, y: input.y });
     // A click picks a line when it's let go, where a page's click handler runs: one pick per click.
     if ((input.type === 'mouseUp' && input.button === 'left') || tapped) picks.set(contents, { at: now, kind: 'click' });
     else if (key !== null && PICK_KEYS.has(key)) picks.set(contents, { at: now, kind: 'key' });
