@@ -58,3 +58,18 @@ test('the user\'s own Alt+E opens Edit, in English; Alt+B in German; Alt+Shift+E
   }
   for (const digit of ['0', '1', '2', '8']) expect(opened(run([down('Alt', { alt: true }), down(digit, { alt: true, code: `Numpad${digit}` })])), `Alt+Numpad${digit}`).toEqual([]);
 });
+
+test('a held Alt+E opens one menu, and Alt+E while an input method is composing opens none', () => {
+  // A held key: the OS repeats it, and Electron says so in isAutoRepeat and in the modifiers.
+  const repeat = { alt: true, isAutoRepeat: true, modifiers: ['alt', 'isautorepeat'] };
+  expect(opened(run([down('Alt', { alt: true }), down('e', { alt: true }), down('e', repeat), down('e', repeat)])), 'Alt+E held, two repeats').toEqual([{ type: 'open', id: 'edit' }]);
+  expect(opened(run([down('Alt', { alt: true }), down('e', { alt: true, isAutoRepeat: true })])), 'a repeat said by isAutoRepeat alone').toEqual([]);
+  expect(opened(run([down('Alt', { alt: true }), down('e', { alt: true, modifiers: ['alt', 'isautorepeat'] })])), 'a repeat said by the modifiers alone').toEqual([]);
+  // A key an input method is composing is the input method's.
+  expect(opened(run([down('Alt', { alt: true }), down('e', { alt: true, isComposing: true })])), 'composing').toEqual([]);
+  expect(opened(run([down('Alt', { alt: true }), down('b', { alt: true, isComposing: true })], german)), 'composing, German').toEqual([]);
+  // One real Alt+E still opens Edit, and Alt held alone still shows the strip when it's let go.
+  expect(opened(run([down('Alt', { alt: true }), down('e', { alt: true }), up('e', { alt: true }), up('Alt')]))).toEqual([{ type: 'open', id: 'edit' }]);
+  const altHeld = run([down('Alt', { alt: true }), down('Alt', { alt: true, isAutoRepeat: true, modifiers: ['alt', 'isautorepeat'] }), up('Alt')]);
+  expect(altHeld.map((action) => action.type), 'Alt held, then let go').toEqual(['none', 'none', 'toggle']);
+});
