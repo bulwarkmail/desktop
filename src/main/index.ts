@@ -32,6 +32,7 @@ import { addRestartTimers, askToRestart, policies } from './features/policies';
 import { devToolsForcedOff } from './features/dev-tools';
 import { privacy } from './features/privacy';
 import { clientAuth } from './features/client-certificates';
+import { uninstallDrivePlaces } from './features/files-drive';
 import { createChannels, registerBridge } from './ipc';
 import { durableWrite, holdsAppLockRecords, KEY_CHECK_FOLDER, KEY_CHECK_SWITCH, KEY_INIT_SWITCH, keyInitArgs, keyOnDisk, keyOpens, KEYS_FOLDER, savedKey, saveKey, settleKeyBeforeChromium, waitForKeyOnDisk } from './key-on-disk';
 import { addWipeStep, notePartition, removeWipedPartitions, restartAfterWipe, wipeForConnectionChange } from './features/local-wipe';
@@ -98,7 +99,11 @@ if (asksForUninstallCleanup(process.argv)) {
   const allowed = process.platform === 'win32' && (!__BULWARK_TEST_BUILD__ || root !== 'HKCU');
   if (allowed) {
     const local = __BULWARK_TEST_BUILD__ ? argValue('bulwark-test-local-dir') ?? null : process.env.LOCALAPPDATA ?? null;
-    await uninstallCleanup({ root, exe: process.execPath, sendTo: sendToFolder(), local }, native().system.registry).catch(() => undefined);
+    // The Files drive of this user's profile. A test build's only when it names its profile, and
+    // never a package with a test profile compiled in.
+    const profile = __BULWARK_TEST_BUILD__ ? argValue('bulwark-user-data') ?? null : __BULWARK_TEST_PROFILE__ ? null : app.getPath('userData');
+    const drive = profile ? { helper: native().files, places: uninstallDrivePlaces(profile) } : null;
+    await uninstallCleanup({ root, exe: process.execPath, sendTo: sendToFolder(), local }, native().system.registry, drive).catch(() => undefined);
   }
   app.exit(allowed || process.platform !== 'win32' ? 0 : 1);
   await new Promise(() => {});

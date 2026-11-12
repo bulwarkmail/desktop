@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
@@ -27,6 +27,7 @@ import {
   DRIVE_PROVIDER,
 } from '../src/main/files/drive-places';
 import type { NativeFetchEvent, NativeFilesModule, NativeSyncRoot } from '../src/main/native-loader';
+import { removeFilesDrive } from '../src/main/uninstall-cleanup';
 import { fakeRegistry } from './fake-registry';
 
 /**
@@ -913,6 +914,44 @@ test.describe("another profile's Files drive", () => {
     await drive.wipe();
     expect(registered.map((root) => root.id)).toEqual([installed.id]);
     expect(calls.filter((call) => call.includes(installed.id))).toEqual([]);
+  });
+
+  test("an uninstall takes every root this profile registered, copies out what wasn't uploaded, and leaves another profile's", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), 'bw-drive-uninstall-'));
+    const documents = mkdtempSync(path.join(tmpdir(), 'bw-drive-documents-'));
+    bases.push(base, documents);
+    const folder = path.join(realpathSync.native(base), 'user@example.org');
+    mkdirSync(folder);
+    writeFileSync(path.join(folder, 'notes.txt'), 'written here, never uploaded');
+    const stray = path.join(realpathSync.native(base), 'gone');
+    mkdirSync(stray);
+    const mine = { id: `${PROVIDER}!${SID}!${rootKey(INSTALLED, 'acct-1')}`, path: folder, displayName: 'Bulwark Files' } as NativeSyncRoot;
+    // Left by a crash: this profile's by its id, no account stored for it.
+    const leftover = { id: `${PROVIDER}!${SID}!${rootKey(INSTALLED, 'acct-gone')}`, path: stray, displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const theirs = { id: `${PROVIDER}!${SID}!${rootKey(OTHER, 'acct-1')}`, path: 'C:\\Users\\someone\\Other Files\\user@example.org', displayName: 'Bulwark Files' } as NativeSyncRoot;
+    const { registered, calls, native } = world([mine, leftover, theirs]);
+    const stored: StoredDrive = { accounts: { 'acct-1': { label: 'user@example.org', folder: 'user@example.org', rootId: 'r1', createdAt: 1, key: rootKey(INSTALLED, 'acct-1') } } };
+    await removeFilesDrive(native, { profile: INSTALLED, provider: PROVIDER, base, documents, stored, supported: true, version: '1' });
+    expect(registered.map((root) => root.id)).toEqual([theirs.id]);
+    expect(calls.filter((call) => call.includes(theirs.id) || call.includes(theirs.path!))).toEqual([]);
+    expect(existsSync(folder)).toBe(false);
+    expect(existsSync(stray)).toBe(false);
+    // The base folder goes once it's empty.
+    expect(existsSync(base)).toBe(false);
+    const rescued = readdirSync(documents, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile());
+    expect(rescued.map((entry) => entry.name)).toEqual(['notes.txt']);
+    expect(readFileSync(path.join(rescued[0].parentPath, 'notes.txt'), 'utf8')).toBe('written here, never uploaded');
+  });
+
+  test('an uninstall with no drive ever turned on, or with no helper, does nothing and says nothing', async () => {
+    const base = mkdtempSync(path.join(tmpdir(), 'bw-drive-uninstall-'));
+    bases.push(base);
+    const theirs = installedRoot();
+    const { registered, calls, native } = world([theirs]);
+    await removeFilesDrive(native, { profile: OTHER, provider: PROVIDER, base, documents: base, stored: {}, supported: true, version: '1' });
+    await removeFilesDrive(null, { profile: INSTALLED, provider: PROVIDER, base, documents: base, stored: {}, supported: true, version: '1' });
+    expect(calls).toEqual([]);
+    expect(registered).toEqual([theirs]);
   });
 });
 

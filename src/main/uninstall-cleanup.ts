@@ -2,17 +2,19 @@
  * `Bulwark.exe --uninstall-cleanup`: what the app wrote into the user's Windows at its starts,
  * taken away again, so Default apps, Open with and Send to don't keep pointing at a deleted exe.
  * The MSI runs it as the user who uninstalls, before it removes the files
- * (scripts/msi-project.cjs). The NSIS uninstaller does the same by itself (build/installer.nsh
- * customUnInstall): keep the two alike. No Electron here, so a test can run it on a key and
+ * (scripts/msi-project.cjs). The NSIS uninstaller runs it too, and takes the registry entries and
+ * folders away by itself as well (build/installer.nsh customUnInstall): keep the two alike. The
+ * Files drive only goes through here. No Electron here, so a test can run it on a key and
  * folders of its own.
  */
 
 import { readdirSync, rmdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { DriveController, type StoredDrive } from './files/drive-controller';
 import { DRIVE_NAME } from './files/drive-places';
 import { DRIVES_KEY, registryLetterLabels } from './files/drive-letter-label';
 import { SEND_TO_NAME, windowsRegistrationKeys } from './features/os-rules';
-import type { Registry } from './native-loader';
+import type { NativeFilesModule, Registry } from './native-loader';
 import { readKey, stringOf, valueOf } from './registry-values';
 
 export const UNINSTALL_CLEANUP_SWITCH = '--uninstall-cleanup';
@@ -89,13 +91,62 @@ export function removeLocalFolders(local: string): void {
   rmSync(path.join(local, 'bulwark-desktop-updater'), { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
 }
 
+/** The Files drive of the profile being left behind, as features/files-drive.ts names it. */
+export interface DrivePlaces {
+  /** The profile folder: its key is in its sync roots' ids. */
+  profile: string;
+  provider: string;
+  /** The folder the accounts' folders are in, `%USERPROFILE%\Bulwark Files` for the installed app. */
+  base: string;
+  /** Where files that weren't uploaded are copied to, as when the policy turns the drive off. */
+  documents: string;
+  /** What the profile kept about the drive: shell-state.json's `filesDrive`. */
+  stored: StoredDrive;
+  /** Windows 10 1809 or later. */
+  supported: boolean;
+  version: string;
+}
+
+/**
+ * The Files drive at an uninstall, done the way the FilesDriveEnabled policy turns it off: what
+ * wasn't uploaded is copied to `Documents\Bulwark – not uploaded\<date>`, every sync root this
+ * profile registered is unregistered (so "Bulwark Files" leaves Explorer's navigation pane), and
+ * their folders go. Another profile's roots, and another user's, stay. With no helper there is
+ * nothing to do. The base folder goes when it's left empty.
+ */
+export async function removeFilesDrive(helper: NativeFilesModule | null, places: DrivePlaces): Promise<void> {
+  if (!helper) return;
+  let stored = places.stored;
+  const drive = new DriveController({
+    native: helper,
+    supported: places.supported,
+    provider: places.provider,
+    base: places.base,
+    profile: places.profile,
+    icon: '',
+    version: places.version,
+    store: { read: () => stored, write: (next) => (stored = next) },
+    policy: () => ({ forcedOff: true, letter: null }),
+    page: { fetch: () => 'not-running', fetchCancelled: () => {}, stateChanged: () => {} },
+    registry: { add: () => {}, remove: () => {} },
+    letters: null,
+    documents: places.documents,
+    watchPins: false,
+    warn: (message) => console.warn(message),
+  });
+  await drive.startUp();
+  removeIfEmpty(places.base);
+}
+
 /**
  * `registry` is the native helper's. Without it nothing in the registry goes, as when reg.exe
- * failed; the folders still do.
+ * failed; the folders still do. `drive`: the Files drive's helper and places; a failure there
+ * stops none of the rest.
  */
-export async function uninstallCleanup(places: CleanupPlaces, registry: Registry | null): Promise<void> {
+export async function uninstallCleanup(places: CleanupPlaces, registry: Registry | null, drive: { helper: NativeFilesModule | null; places: DrivePlaces } | null = null): Promise<void> {
   if (registry) await cleanRegistry(registry, places.root, places.exe);
   if (places.sendTo) rmSync(path.join(places.sendTo, `${SEND_TO_NAME}.lnk`), { force: true });
+  if (drive) await removeFilesDrive(drive.helper, drive.places).catch((error) => console.warn('Removing the Files drive failed:', error));
   if (places.local) removeLocalFolders(places.local);
 }
 
