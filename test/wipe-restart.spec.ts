@@ -189,12 +189,16 @@ test.describe("a server's page wipes its own server", () => {
       await seed.app.close().catch(() => {});
     }
 
-    // The page asks for a wipe as soon as it loads. Nobody clicks; a native question would get its safe button.
-    const { app } = await openInstance(profile, 'wipe');
+    // Opened looking only, so the restart is stubbed before the page asks; then the page asks for a
+    // wipe as soon as it loads. Nobody clicks; a native question would get its safe button.
+    const { app, page } = await openInstance(profile, 'idle');
     const running = app.process();
     const gone = exits(app);
     try {
       await fakeOsIntegration(app, 1);
+      expect(reported('wipe-done'), 'nothing wiped before the restart is stubbed').toEqual([]);
+      instance.mode = 'wipe';
+      await page.reload().catch(() => {});
       await expect.poll(() => reported('wipe-done').length + reported('wipe-error').length + reported('wipe-no-claim').length, { timeout: 30_000 }).toBeGreaterThan(0);
       expect(reported('wipe-no-claim'), 'the wipe is still on the bridge').toEqual([]);
       expect(reported('wipe-error')).toEqual([]);
