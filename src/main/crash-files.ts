@@ -8,8 +8,10 @@
  * It runs in a process of its own, as a file can be 64 MB.
  */
 
-import { readdirSync, rmSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { APP_ORIGIN } from '../server/protocol';
 
 export interface CrashLimits {
   count: number;
@@ -87,6 +89,73 @@ export function sweepCrashFiles(dir: string, limits: CrashLimits = CRASH_LIMITS,
 /** Consent taken back, a policy, a wipe: none stay. */
 export function removeAllCrashFiles(dir: string): void {
   for (const crash of listCrashFiles(dir)) {
+    try {
+      removeCrash(dir, crash);
+    } catch (error) {
+      console.warn('A crash file could not be removed:', error);
+    }
+  }
+}
+
+/**
+ * Which page each run of the app was for, by a hash of its origin, and when it started. A crash
+ * file belongs to the page whose run it fell in, so a server's wipe can take its own. No address
+ * is written: a hash says enough.
+ */
+export interface CrashRun {
+  page: string;
+  at: number;
+}
+
+const RUNS_FILE = 'runs.json';
+const MAX_RUNS = 50;
+
+export function crashPageOf(origin: string): string {
+  return createHash('sha256').update(origin).digest('hex').slice(0, 16);
+}
+
+export function readCrashRuns(dir: string): CrashRun[] {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(dir, RUNS_FILE), 'utf8')) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((run): run is CrashRun => typeof run?.page === 'string' && typeof run?.at === 'number') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** This run is for `origin`: noted at its start, the newest last. */
+export function noteCrashRun(dir: string, origin: string, at = Date.now()): void {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const runs = [...readCrashRuns(dir), { page: crashPageOf(origin), at }].slice(-MAX_RUNS);
+    writeFileSync(path.join(dir, RUNS_FILE), JSON.stringify(runs));
+  } catch (error) {
+    console.warn('The crash files\' run list could not be written:', error);
+  }
+}
+
+/**
+ * The crash files of `origin`'s runs: those written after a run for it started and before the
+ * next run did. One from before any run was noted is the standalone page's.
+ */
+export function crashFilesOf(crashes: readonly CrashFile[], runs: readonly CrashRun[], origin: string): CrashFile[] {
+  const page = crashPageOf(origin);
+  const standalone = crashPageOf(APP_ORIGIN);
+  const ordered = [...runs].sort((a, b) => a.at - b.at);
+  return crashes.filter((crash) => {
+    const run = ordered.filter((candidate) => candidate.at <= crash.createdAt).at(-1);
+    return (run?.page ?? standalone) === page;
+  });
+}
+
+/** A server's wipe: its crash files go. Null: all of them, and the run list with them. */
+export function removeCrashFilesOf(dir: string, origin: string | null): void {
+  if (origin === null) {
+    removeAllCrashFiles(dir);
+    rmSync(path.join(dir, RUNS_FILE), { force: true });
+    return;
+  }
+  for (const crash of crashFilesOf(listCrashFiles(dir), readCrashRuns(dir), origin)) {
     try {
       removeCrash(dir, crash);
     } catch (error) {

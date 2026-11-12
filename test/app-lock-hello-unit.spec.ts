@@ -5,7 +5,8 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
-import { AppLockHello, deterministicSignature, helloChallenge, helloKeyName, removeAllHelloKeys, type HelloKeys } from '../src/main/app-lock-hello';
+import { appLockSite, isSiteFile } from '../src/main/app-lock-gate';
+import { AppLockHello, deterministicSignature, helloChallenge, helloKeyName, removeAllHelloKeys, removeHelloKeyOf, type HelloKeys } from '../src/main/app-lock-hello';
 import { fakeHelloKeys } from '../src/main/app-lock-hello-fake';
 
 const salt = (seed: number) => new Uint8Array(32).fill(seed);
@@ -133,4 +134,30 @@ test('removing asks Windows only when there is something of ours, and the wipe t
   expect(fake.names()).toEqual([]);
   await removeAllHelloKeys(path.join(folder, 'not-there'), keys);
   expect(existsSync(folder)).toBe(true);
+});
+
+test("a server's wipe takes its own key credential and marker, and leaves another origin's", async () => {
+  const deleted: string[] = [];
+  const fake = fakeHelloKeys(() => 'yes');
+  const keys = { ...fake, delete: async (name: string) => { deleted.push(name); return fake.delete(name); } };
+  const mine = appLockSite('https://mail.example.org');
+  const theirs = appLockSite('https://app.bulwark.localhost');
+  await new AppLockHello({ keys, name: 'Bulwark app lock mine', site: mine, folder, allowed: () => true }).enroll(salt(1), window);
+  await new AppLockHello({ keys, name: 'Bulwark app lock theirs', site: theirs, folder, allowed: () => true }).enroll(salt(1), window);
+  await removeHelloKeyOf(folder, mine, keys);
+  expect(deleted).toEqual(['Bulwark app lock mine']);
+  expect(readdirSync(folder)).toEqual([`${theirs}.hello.json`]);
+  expect(fake.names()).toEqual(['Bulwark app lock theirs']);
+  // Nothing set up: nothing asked of Windows.
+  await removeHelloKeyOf(folder, mine, keys);
+  expect(deleted).toEqual(['Bulwark app lock mine']);
+});
+
+test("an origin's files in the app-lock folder are told apart by its site, and only its own match", () => {
+  const site = appLockSite('https://mail.example.org');
+  const other = appLockSite('https://app.bulwark.localhost');
+  expect(site).toMatch(/^[0-9a-f]{16}$/);
+  expect(site).not.toBe(other);
+  for (const name of [`${site}.json`, `${site}.hello.json`, `app-lock-key-${site}.bin`, `app-lock-pepper-${site}.bin`]) expect(isSiteFile(name, site), name).toBe(true);
+  for (const name of [`${other}.json`, `${other}.hello.json`, `app-lock-pepper-${other}.bin`, `${site}`, `x${site}.json`, `app-lock-pepper-${site}x.bin`, `app-lock-pepper-${site}.bin.tmp`]) expect(isSiteFile(name, site), name).toBe(false);
 });

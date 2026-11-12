@@ -20,6 +20,7 @@ import { EventEmitter } from 'node:events';
 import { app, BrowserWindow, screen, type BrowserWindowConstructorOptions, type Session, type WebContents, type WebPreferences } from 'electron';
 import { CHANNEL, PRELOAD_ARG, type FlushAnswer, type Mode, type WindowInfo, type WindowType } from '../shared/bridge';
 import type { SessionWindow, StateFile } from './state';
+import { urlOfOrigin, wipeCovers } from './wipe-scope';
 import { keystoreOffByPolicy } from './keystore-policy';
 import { native } from './native';
 import { showMessageBox } from './message-box';
@@ -972,13 +973,19 @@ export class WindowManager extends EventEmitter<{
     return entries;
   }
 
-  /** Local data was wiped: what was to come back names drafts and messages that no longer are. */
-  forgetSession(): void {
+  /**
+   * Local data was wiped: what was to come back names drafts and messages that no longer are.
+   * `origin`: that server's pages only. Null: all of them.
+   */
+  forgetSession(origin: string | null = null): void {
     const { state } = this.options;
-    this.savedSession = [];
-    delete state.data.session;
+    const others = (entries: SessionWindow[] | undefined) => (entries ?? []).filter((entry) => !urlOfOrigin(entry.url, origin));
+    this.savedSession = others(this.savedSession);
+    const left = others(state.data.session);
+    if (left.length > 0) state.data.session = left;
+    else delete state.data.session;
     delete state.data.restoreAttempts;
-    delete state.data.resumeAfterRestart;
+    if (state.data.resumeAfterRestart && wipeCovers(origin, state.data.resumeAfterRestart.origin)) delete state.data.resumeAfterRestart;
     state.save();
   }
 

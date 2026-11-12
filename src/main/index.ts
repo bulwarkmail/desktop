@@ -34,7 +34,7 @@ import { privacy } from './features/privacy';
 import { clientAuth } from './features/client-certificates';
 import { createChannels, registerBridge } from './ipc';
 import { durableWrite, holdsAppLockRecords, KEY_CHECK_FOLDER, KEY_CHECK_SWITCH, KEY_INIT_SWITCH, keyInitArgs, keyOnDisk, keyOpens, KEYS_FOLDER, savedKey, saveKey, settleKeyBeforeChromium, waitForKeyOnDisk } from './key-on-disk';
-import { addWipeStep, notePartition, restartAfterWipe } from './features/local-wipe';
+import { addWipeStep, notePartition, restartAfterWipe, wipeForConnectionChange } from './features/local-wipe';
 import { native } from './native';
 import { LocalAdmin } from './local-admin';
 import { requestGate } from './request-gate';
@@ -201,6 +201,8 @@ let menu: MenuController | null = null;
 const zoom = new ZoomController(stateFile);
 /** A bulwark:// link from before anyone was signed in: a pop-out borrows the main window's session. */
 let pendingDeepLink: WindowLink | null = null;
+/** The page this run is on and its partition: what "Change connection…" offers to remove. */
+let runningOn: { mode: Mode; origin: string; session: Electron.Session } | null = null;
 let sessionReady = false;
 const linkLimit = new LinkRateLimit();
 
@@ -296,8 +298,9 @@ function createWindowManager(mode: Mode, origin: string, session: Electron.Sessi
   });
   zoom.attach(windowManager);
   menu!.attach(windowManager);
-  // Windows to bring back can't be told apart by account, and bringing them back costs little.
-  addWipeStep(async () => windowManager?.forgetSession(), { perAccount: true });
+  // Windows to bring back can't be told apart by account, and bringing them back costs little. By
+  // server they can: a server's wipe takes its own pages.
+  addWipeStep(async ({ origin, account }) => windowManager?.forgetSession(account === null ? origin : null), { perAccount: true });
   windowManager.on('sessionReady', onSessionReady);
   // A development switch for the test of the tray's hook, until the tray exists.
   if (__BULWARK_TEST_BUILD__ && DEV && process.argv.includes('--bulwark-test-close-to-background')) windowManager.setCloseToBackground(() => true);
@@ -465,6 +468,7 @@ async function bootStandaloneServer(theme: ThemeController): Promise<void> {
   });
   keepSignInsOnDisk(session);
   notePartition(stateFile, APP_PARTITION);
+  runningOn = { mode: 'standalone', origin: APP_ORIGIN, session };
   applyPermissionPolicy(session, APP_ORIGIN);
 
   const cors = new CorsInjector(session, APP_ORIGIN);
@@ -579,6 +583,7 @@ async function bootInstance(instanceUrl: string, theme: ThemeController): Promis
   const session = electronSession.fromPartition(partition);
   keepSignInsOnDisk(session);
   notePartition(stateFile, partition);
+  runningOn = { mode: 'instance', origin, session };
   closeDictionaryDownloads(session);
   applyPermissionPolicy(session, origin);
   const windows = createWindowManager('instance', origin, session, theme, instanceUrl);
@@ -833,10 +838,42 @@ function showMain(options: { hidden?: boolean } = {}): void {
 // Quitting closes the windows, and each may ask first. Nothing is forgotten until all
 // of them have gone, so choosing Stay keeps the mode.
 let switching = false;
+let offering = false;
 
 function switchMode(): void {
-  switching = true;
-  app.quit();
+  if (offering) return;
+  offering = true;
+  void offerToRemoveServer().catch((error) => console.error(error)).finally(() => {
+    offering = false;
+    switching = true;
+    app.quit();
+  });
+}
+
+/**
+ * The server being left keeps its partition, sign-in and offline mail on this device, so coming
+ * back to it finds them. Main offers in its own words to remove them instead; Keep is the safe
+ * default. Nothing a page sent words this question (strings.ts).
+ */
+async function offerToRemoveServer(): Promise<void> {
+  const run = runningOn;
+  if (!run) return;
+  const text = strings();
+  const options: Electron.MessageBoxOptions = {
+    type: 'question',
+    title: 'Bulwark',
+    message: run.mode === 'instance' ? text.connectionWipeTitle(new URL(run.origin).host) : text.connectionWipeTitleApp,
+    detail: text.connectionWipeDetail,
+    buttons: [text.connectionWipeRemove, text.connectionWipeKeep],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  };
+  const parent = windowManager?.mainWindow() ?? null;
+  const { response } = await showMessageBox(parent && !parent.isDestroyed() ? parent : null, options);
+  if (response !== 0) return;
+  const failed = await wipeForConnectionChange(run.session, run.origin, stateFile);
+  if (failed.length > 0) console.warn(`Removing what ${run.origin} kept on this device left: ${failed.join(', ')}`);
 }
 
 /** Where the page can't ask (an older webmail, an error page): the OS's question, never none. */

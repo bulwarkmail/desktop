@@ -590,7 +590,7 @@ test.describe('the folders, the policy and a wipe', () => {
     filesRegistry.add(drive);
     for (const id of [a.id, b.id, drive.root.id]) await store.saveState(id, `state of ${id}`);
 
-    await folders.wipe('acct-1');
+    await folders.wipe('acct-1', 'https://app.example');
     expect(filesRegistry.list().map((entry) => entry.root.id).sort()).toEqual([b.id, 'drive-root-2'].sort());
     expect((await store.list()).map((stored) => stored.id)).toEqual([b.id]);
     expect(await store.loadState(a.id)).toBeNull();
@@ -598,9 +598,35 @@ test.describe('the folders, the policy and a wipe', () => {
     expect(await store.loadState('drive-root-2')).toBeNull();
     expect(await store.loadState(b.id)).toBe(`state of ${b.id}`);
 
-    await folders.wipe(null);
+    await folders.wipe(null, null);
     expect(filesRegistry.list().map((entry) => entry.root.id)).toEqual(['drive-root-2']);
     expect(existsSync(path.join(data, 'files-sync'))).toBe(false);
+    expect(readFileSync(path.join(mine, 'keep.txt'), 'utf8')).toBe('keep');
+  });
+
+  test("a server's wipe takes its page's folder roots and their records, and leaves another page's", async () => {
+    const { store, folders } = await world();
+    const mine = tempFolder('own1');
+    writeFileSync(path.join(mine, 'keep.txt'), 'keep');
+    const a = await folders.add(mine, { account: 'acct-1', remoteId: null, remoteLabel: 'A' });
+    const b = await folders.add(tempFolder('own2'), { account: 'acct-2', remoteId: null, remoteLabel: 'B' });
+    const other = { id: 'other-origin-root', account: 'acct-1', origin: 'https://other.example', dir: tempFolder('own3'), remoteId: null, remoteLabel: 'C', paused: false, createdAt: 0 };
+    await store.add(other);
+    for (const id of [a.id, b.id, other.id]) await store.saveState(id, `state of ${id}`);
+
+    // Another page's wipe, from here: this run's roots stay listed, that page's record goes.
+    await folders.wipe(null, 'https://other.example');
+    expect(filesRegistry.list().map((entry) => entry.root.id).sort()).toEqual([a.id, b.id].sort());
+    expect((await store.list()).map((stored) => stored.id).sort()).toEqual([a.id, b.id].sort());
+    expect(await store.loadState(other.id)).toBeNull();
+
+    await store.add(other);
+    await store.saveState(other.id, 'state of the other');
+    await folders.wipe(null, 'https://app.example');
+    expect(filesRegistry.list()).toEqual([]);
+    expect((await store.list()).map((stored) => stored.id)).toEqual([other.id]);
+    expect(await store.loadState(other.id)).toBe('state of the other');
+    expect(await store.loadState(a.id)).toBeNull();
     expect(readFileSync(path.join(mine, 'keep.txt'), 'utf8')).toBe('keep');
   });
 });

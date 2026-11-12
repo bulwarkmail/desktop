@@ -68,7 +68,8 @@ export const dialogsFeature: Feature = {
   name: 'dialogs',
   modes: ['standalone', 'instance'],
   setup(ctx) {
-    // A wipe of what's local covers the copies waiting to be pasted.
+    // A wipe of what's local covers the copies waiting to be pasted. All of them are this run's,
+    // so its server's: the folder is emptied at every start and quit.
     addWipeStep(async () => emptyClipboardFolder());
     emptyClipboardFolder();
     app.on('will-quit', emptyClipboardFolder);

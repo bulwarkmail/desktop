@@ -234,10 +234,11 @@ function driveController(ctx?: Pick<FeatureContext, 'state' | 'windows' | 'showM
 /** A wipe before the feature started had no profile to clear the wishes from. */
 let wipedEarly = false;
 
-// Whatever the mode, and before the feature's setup: a wipe at the start comes first.
-addWipeStep(async () => {
-  if (!controller) wipedEarly = true;
-  await driveController()?.wipe();
+// Whatever the mode, and before the feature's setup: a wipe at the start comes first. A server's
+// wipe takes the accounts turned on from its page (DriveController.wipe).
+addWipeStep(async ({ origin }) => {
+  if (!controller && origin === null) wipedEarly = true;
+  await driveController()?.wipe(origin);
 });
 
 /** For the folders feature: where the drive keeps its folders, which no folder pair may touch. */

@@ -283,8 +283,8 @@ export function setupRecentFiles(hub: OsHub): RecentHandle {
     // An id from a list before is no way in any more.
     listed.clear();
   };
-  // A wipe takes every server's yes: the next list asks again.
-  addWipeStep(async () => forget());
+  // A server's wipe takes its own yes, the policy's every server's: the next list asks again.
+  addWipeStep(async ({ origin }) => forget(origin ?? undefined));
 
   const remember = (sender: WebContents, ids: Map<string, string>) => {
     if (!listed.has(sender.id)) {

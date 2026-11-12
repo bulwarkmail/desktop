@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
@@ -1121,6 +1121,47 @@ test.describe('turning the drive on: a click, and then the user\'s yes', () => {
       const entry = (name: string) => ({ path: name, kind: 'file' as const, size: 1, mtimeMs: 1, identity: 'i' });
       const placed = await drive.place(on.value.id, ['ok.txt', 'con', 'aux.txt', 'trailing.', 'trailing ', 'note:stream', '../out'].map(entry));
       expect(placed).toEqual({ ok: true, value: [{ path: 'ok.txt' }, { path: 'con', error: 'name' }, { path: 'aux.txt', error: 'name' }, { path: 'trailing.', error: 'name' }, { path: 'trailing ', error: 'name' }, { path: 'note:stream', error: 'name' }, { path: '../out', error: 'outside' }] });
+    } finally {
+      remove();
+    }
+  });
+
+  test("a server's wipe takes the accounts turned on from its page and leaves another page's", async () => {
+    const SERVER = 'https://mail.example.org';
+    const older = (label: string) => ({ label, folder: label, rootId: `r-${label}`, createdAt: 1 });
+    const stored: StoredDrive = {
+      accounts: {
+        // From before accounts named their page: one with this server's yes, one without.
+        'old-acct': older('old@example.org'),
+        'stray-acct': older('stray@example.org'),
+        'other-acct': { ...older('other@example.org'), origin: 'https://other.example' },
+      },
+    };
+    const { drive, base, registered, yes, store, remove } = askingDrive([true], { stored });
+    try {
+      for (const account of ['old-acct', 'stray-acct']) registered.push(`Bulwark Test Unit!S-1-5-21-1!${accountKey(PROFILE, account)}`);
+      registered.push(`Bulwark Test Unit!S-1-5-21-1!${rootKey(PROFILE, 'other-acct')}`);
+      yes.add('old-acct');
+      const on = await drive.enable('acct-1', 'alice@example.org', click);
+      expect(on.ok).toBe(true);
+      expect(store.value.accounts?.['acct-1']?.origin, 'turned on from this page').toBe(SERVER);
+      const folders = () => readdirSync(realpathSync.native(base)).sort();
+      mkdirSync(path.join(base, 'old@example.org'));
+      mkdirSync(path.join(base, 'stray@example.org'));
+      mkdirSync(path.join(base, 'other@example.org'));
+      expect(folders()).toEqual(['alice@example.org', 'old@example.org', 'other@example.org', 'stray@example.org']);
+
+      await drive.wipe(SERVER);
+      expect(Object.keys(store.value.accounts ?? {}).sort()).toEqual(['other-acct', 'stray-acct']);
+      expect(registered.map(keyOfRoot).sort()).toEqual([accountKey(PROFILE, 'stray-acct'), rootKey(PROFILE, 'other-acct')].sort());
+      expect([...yes]).toEqual([]);
+      expect(folders()).toEqual(['other@example.org', 'stray@example.org']);
+
+      // The standalone page's wipe takes the older account with no yes; the other page's stays.
+      await drive.wipe('https://app.bulwark.localhost');
+      expect(Object.keys(store.value.accounts ?? {})).toEqual(['other-acct']);
+      expect(registered.map(keyOfRoot)).toEqual([rootKey(PROFILE, 'other-acct')]);
+      expect(folders()).toEqual(['other@example.org']);
     } finally {
       remove();
     }

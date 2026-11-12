@@ -1,15 +1,24 @@
 /**
- * Deleting what the app keeps on this device, by main, for every partition: the
- * standalone profile and each Bulwark server's. A page only sees its own partition, so
- * a wipe that ran in a page would leave the others, and a same-origin plugin could
- * say it was done without doing it. So no renderer takes part and none decides.
+ * Deleting what the app keeps on this device, by main. A page only sees its own partition, and
+ * a same-origin plugin could say it was done without doing it, so no renderer takes part and
+ * none decides.
  *
- * `runLocalWipe` is what a policy's wipe calls, and what's added with `addWipeStep` goes with it.
- * A remote wipe and a wipe from settings run in the page, which holds the account list and the
- * instance's answer. At their end they call `wipeForPage`, handed to the page through `claim`, so
- * not to a frame. That runs the same steps and answers what failed, because a remote wipe mustn't be
- * reported as done with a step undone. Then `finishWipeForPage` restarts, once the page has told
- * the instance. One account of several: only what's that account's, and no restart.
+ * Whose things go (wipe-scope.ts):
+ * - A wipe a server's page asks for (its settings, or its admin's remote wipe) takes that
+ *   server's things and nothing of another server's: its partition, and the shell's records
+ *   keyed to its origin. Nobody is asked: the page asked its own question, and a remote wipe has
+ *   nobody to ask. The servers this device approved and the CORS origins are the standalone
+ *   page's, and go with its wipe only.
+ * - "Change connection…" offers the same for the server being left (index.ts).
+ * - Only the WipeOfflineData policy takes everything: every partition of the profile, and every
+ *   origin's records. That's `runLocalWipe`.
+ *
+ * What a feature keeps goes with `addWipeStep`: each step hears whose things go. A remote wipe
+ * and a wipe from settings run in the page, which holds the account list and the instance's
+ * answer. At their end they call `wipeForPage`, handed to the page through `claim`, so not to a
+ * frame. That runs the steps and answers what failed, because a remote wipe mustn't be reported
+ * as done with a step undone. Then `finishWipeForPage` restarts, once the page has told the
+ * instance. One account of several: only what's that account's, and no restart.
  *
  * A wipe with windows open ends in a restart, so whoever's there lands on a clean first
  * screen. A wipe at the start, before any window, goes on into that same start: there's
@@ -20,12 +29,13 @@
 import { readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { BrowserWindow, session as electronSession, type Session } from 'electron';
+import { APP_ORIGIN } from '../../server/protocol';
 import type { StateFile } from '../state';
+import { urlOfOrigin, wipeCovers, type WipeReason, type WipeScope } from '../wipe-scope';
 
-export type WipeReason = 'policy-nonce' | 'remote' | 'settings';
+export type { WipeReason, WipeScope } from '../wipe-scope';
 
-/** `account`: the page's account id when only that account's things go, null for everything. */
-export type WipeStep = (session: Session, partition: string, reason: WipeReason, account: string | null) => Promise<void>;
+export type WipeStep = (scope: WipeScope) => Promise<void>;
 
 const steps = new Set<WipeStep>();
 /** The steps that also go for one account of several: what can't be told apart, and costs little. */
@@ -116,28 +126,61 @@ export interface WipeResult {
   failed: string[];
 }
 
-function forgetServersAndWindows(state: StateFile): void {
-  // The windows to bring back name drafts and messages. A wipe at the start comes before any window manager.
-  delete state.data.session;
-  delete state.data.restoreAttempts;
-  // Which servers this device signed in to through the browser.
-  delete state.data.signInPorts;
-  state.data.corsOrigins = [];
-  state.data.approvedServers = [];
+/**
+ * The shell's own records of whose things go: `origin`'s, or everyone's for null. The windows
+ * to bring back name drafts and messages. The servers approved on this device, the CORS
+ * origins and the browser sign-in's ports are the standalone page's: only its wipe takes them.
+ */
+function forgetShellRecords(state: StateFile, origin: string | null): void {
+  const { data } = state;
+  // A wipe at the start comes before any window manager.
+  const sessionLeft = (data.session ?? []).filter((entry) => !urlOfOrigin(entry.url, origin));
+  if (sessionLeft.length > 0) data.session = sessionLeft;
+  else delete data.session;
+  delete data.restoreAttempts;
+  if (data.resumeAfterRestart && wipeCovers(origin, data.resumeAfterRestart.origin)) delete data.resumeAfterRestart;
+  if (origin === null || origin === APP_ORIGIN) {
+    // Which servers this device signed in to through the browser.
+    delete data.signInPorts;
+    data.corsOrigins = [];
+    data.approvedServers = [];
+  }
+  data.overlayByOrigin = origin === null ? {} : Object.fromEntries(Object.entries(data.overlayByOrigin ?? {}).filter(([owner]) => owner !== origin));
+  if (data.keystoreOrigins) data.keystoreOrigins = data.keystoreOrigins.filter((owner) => !wipeCovers(origin, owner));
+  if (data.recentFilesOrigins) data.recentFilesOrigins = data.recentFilesOrigins.filter((owner) => !wipeCovers(origin, owner));
+  if (data.importJobs) data.importJobs = data.importJobs.filter((job) => !wipeCovers(origin, job.origin));
+  if (data.filesDriveConsent) data.filesDriveConsent = data.filesDriveConsent.filter((entry) => !wipeCovers(origin, entry.origin));
   state.save();
+}
+
+/** Each step, whatever another did. Answers what failed, by the step's own words. */
+async function runSteps(scope: WipeScope): Promise<string[]> {
+  const failed: string[] = [];
+  for (const step of steps) {
+    try {
+      await step(scope);
+    } catch (error) {
+      console.error('A wipe step failed:', error);
+      failed.push((error as Error)?.message || 'step');
+    }
+  }
+  return failed;
 }
 
 /** How long a page gets after main's steps, to tell the instance. It may have gone by then. */
 const FINISH_WAIT_MS = 20_000;
 let finishWaiting: ReturnType<typeof setTimeout> | null = null;
 
-/** What the page can't do. It stands on its own partition, and that goes in `finishWipeForPage`. Answers what failed. */
-export async function wipeForPage({ reason, account }: { reason: 'remote' | 'settings'; account: string | null }, sender: Session, userData: string, state: StateFile): Promise<string[]> {
+/**
+ * What the page can't do, for its own server only: `origin` is the page's, `sender` its
+ * partition's session, which goes in `finishWipeForPage`. Answers what failed.
+ */
+export async function wipeForPage({ reason, account }: { reason: 'remote' | 'settings'; account: string | null }, sender: Session, origin: string, state: StateFile): Promise<string[]> {
   const failed: string[] = [];
   if (account !== null) {
     try {
       await sender.clearCache();
-      for (const step of accountSteps) await step(sender, '', reason, account);
+      for (const step of accountSteps) await step({ reason, origin, account });
     } catch (error) {
       console.error('Wiping an account failed:', error);
       failed.push('account');
@@ -145,49 +188,32 @@ export async function wipeForPage({ reason, account }: { reason: 'remote' | 'set
     return failed;
   }
   wiping = true;
-  forgetServersAndWindows(state);
-  for (const folder of unnotedPartitionFolders(userData, state)) {
-    try {
-      rmSync(folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
-    } catch (error) {
-      console.error(`Wiping ${folder} failed:`, error);
-      failed.push(path.basename(folder));
-    }
-  }
-  const partitions = knownPartitions(state);
-  for (const partition of partitions) {
-    const session = electronSession.fromPartition(partition);
-    try {
-      if (session !== sender) await session.clearStorageData();
-      await session.clearCache();
-      await session.clearAuthCache();
-    } catch (error) {
-      console.error(`Wiping ${partition} failed:`, error);
-      failed.push(partition);
-    }
-  }
-  try {
-    await sender.clearCache();
-  } catch (error) {
-    console.error('Clearing the cache failed:', error);
-    failed.push('cache');
-  }
-  // Once, not per partition: none of them looks at which it's given, and a step that throws names what's left.
-  for (const step of steps) {
-    try {
-      await step(sender, partitions[0] ?? '', reason, null);
-    } catch (error) {
-      console.error('A wipe step failed:', error);
-      failed.push((error as Error)?.message || 'step');
-    }
-  }
-  state.save();
+  failed.push(...(await wipeServer(reason, sender, origin, state)));
   if (failed.length > 0) {
     wiping = false;
     return failed;
   }
   // A page that goes before it gets to finish: the next start would stop here anyway.
   finishWaiting = setTimeout(() => void finishWipeForPage(sender, true), FINISH_WAIT_MS);
+  return failed;
+}
+
+/**
+ * One server's things: its partition's cache and sign-ins, every step's part, and its records.
+ * The records last: the drive's step tells an older account's page by the yes kept there. The
+ * storage is the caller's.
+ */
+async function wipeServer(reason: WipeReason, session: Session, origin: string, state: StateFile): Promise<string[]> {
+  const failed: string[] = [];
+  try {
+    await session.clearCache();
+    await session.clearAuthCache();
+  } catch (error) {
+    console.error('Clearing the cache failed:', error);
+    failed.push('cache');
+  }
+  failed.push(...(await runSteps({ reason, origin, account: null })));
+  forgetShellRecords(state, origin);
   return failed;
 }
 
@@ -212,16 +238,34 @@ export async function finishWipeForPage(sender: Session, keepLocalStorage: boole
 }
 
 /**
+ * "Change connection…" with the user's yes to removing the server being left: the same as that
+ * server's own wipe, with nobody left to tell. The windows go blank first, as a page holds its
+ * database open; the switch's restart follows. Answers what failed.
+ */
+export async function wipeForConnectionChange(session: Session, origin: string, state: StateFile): Promise<string[]> {
+  wiping = true;
+  await leaveWindows();
+  const failed = await wipeServer('connection', session, origin, state);
+  try {
+    await session.clearStorageData();
+  } catch (error) {
+    console.error('Clearing the storage failed:', error);
+    failed.push('storage');
+  }
+  return failed;
+}
+
+/**
  * Everything, the HTTP cache too: it held whatever the mail server sent before a page asked
  * for `no-store`, attachments and whole messages among it. Sign-ins go too: the keys and the
  * account list do, and a cookie with no account would only confuse the start-up. So do the
  * mail servers this profile has used: a device told to remove everything doesn't keep their
  * names. Done means every partition finished: on any failure the caller asks again next time.
+ * Only the WipeOfflineData policy asks for this.
  */
 export async function runLocalWipe(reason: WipeReason, userData: string, state: StateFile): Promise<WipeResult> {
   wiping = true;
   const hadWindows = await leaveWindows();
-  forgetServersAndWindows(state);
   const partitions = knownPartitions(state);
   const failed: string[] = [];
   // No session has these open, and none may: see knownPartitions.
@@ -239,13 +283,13 @@ export async function runLocalWipe(reason: WipeReason, userData: string, state: 
       await session.clearStorageData();
       await session.clearCache();
       await session.clearAuthCache();
-      for (const step of steps) await step(session, partition, reason, null);
     } catch (error) {
       console.error(`Wiping ${partition} failed:`, error);
       failed.push(partition);
     }
   }
-  state.save();
+  failed.push(...(await runSteps({ reason, origin: null, account: null })));
+  forgetShellRecords(state, null);
   if (hadWindows) restartSoon();
   else wiping = false;
   return { partitions, failed };

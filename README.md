@@ -9,6 +9,8 @@ The Bulwark desktop app: a thin Electron shell around the webmail. Most of the c
 
 The first run asks which one. The File menu changes it later.
 
+Each server keeps its own data on this computer: a partition of its own (the sign-in, mail kept offline, drafts, messages waiting to be sent) and the shell's records for it (edited attachments, the Files drive and synced folders of its accounts, local imports, crash files, windows to bring back, the app lock). "Change connection…" keeps the old server's data, so going back to it finds everything as it was, and then asks whether to remove it instead; Keep is the default. A wipe asked for by a server's page ("Remove everything from this device" in its settings, or a remote wipe its admin sends) removes that server's data and nothing of another server's, without asking: the page has asked already, and a remote wipe has nobody to ask. The servers approved on this computer belong to the standalone page and go with its wipe. Only the `WipeOfflineData` policy clears the whole profile, every server's data in it.
+
 ## Develop
 
 ```sh

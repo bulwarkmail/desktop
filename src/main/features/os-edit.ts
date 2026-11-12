@@ -239,12 +239,33 @@ export interface EditHandle {
   tick: () => Promise<void>;
 }
 
-let running: { wipeEverything: () => string[] } | null = null;
+let running: { wipeEverything: (origin: string | null) => string[] } | null = null;
+
+/** The folders of one origin's copies, from their records, for a wipe before the feature started. */
+function removeFoldersOf(root: string, origin: string): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return [];
+  }
+  const left: string[] = [];
+  for (const name of names) {
+    const folder = path.join(root, name);
+    const records = readRecords(folder);
+    if (records.length === 0 || !records.every((record) => record.origin === origin)) continue;
+    if (!removeFolderNow(folder)) left.push(name);
+  }
+  return left;
+}
 
 // At load, not in setup: a policy's wipe at the start of a launch comes before any feature. Throwing
-// is how the wipe hears it isn't done: it asks again, and a program may have let go by then.
-addWipeStep(async () => {
-  const left = running ? running.wipeEverything() : removeAllFolders(editRoot()).map((folder) => path.basename(folder));
+// is how the wipe hears it isn't done: it asks again, and a program may have let go by then. Each
+// copy's record names the page it was opened from: a server's wipe takes those of its page.
+addWipeStep(async ({ origin }) => {
+  const left = running
+    ? running.wipeEverything(origin)
+    : origin === null ? removeAllFolders(editRoot()).map((folder) => path.basename(folder)) : removeFoldersOf(editRoot(), origin);
   if (left.length > 0) throw new Error(`${left.length} edited files are held by another program`);
 });
 
@@ -865,13 +886,19 @@ export function setupEdit(hub: OsHub): EditHandle {
     return { held: gone ? [] : [session.record.name] };
   };
 
-  const wipeEverything = (): string[] => {
+  /** `owner`: that page's copies only. Null: everyone's, and whatever else is in the folder. */
+  const wipeEverything = (owner: string | null): string[] => {
     const left: string[] = [];
-    for (const session of [...sessions.values()]) if (!removeSession(session, 'forced')) left.push(session.record.name);
-    const stillThere = new Set([...sessions.values()].map(({ record }) => folderIdOf(record)));
-    for (const folder of removeAllFolders(root, stillThere)) {
-      holdFolder(folder);
-      left.push(path.basename(folder));
+    for (const session of [...sessions.values()]) {
+      if (owner !== null && session.record.origin !== owner) continue;
+      if (!removeSession(session, 'forced')) left.push(session.record.name);
+    }
+    if (owner === null) {
+      const stillThere = new Set([...sessions.values()].map(({ record }) => folderIdOf(record)));
+      for (const folder of removeAllFolders(root, stillThere)) {
+        holdFolder(folder);
+        left.push(path.basename(folder));
+      }
     }
     announce();
     return left;
