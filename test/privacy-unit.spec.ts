@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { buildSync } from 'esbuild';
 import { expect, test } from '@playwright/test';
-import { buildCrashUpload, crashFilesOf, listCrashFiles, noteCrashRun, readCrashRuns, removeAllCrashFiles, removeCrashFilesOf, scrubMinidump, sweepCrashFiles, validUploadUrl, type ScrubNames } from '../src/main/crash-files';
+import { buildCrashUpload, crashFilesOf, crashPageOf, listCrashFiles, noteCrashRun, readCrashRuns, removeAllCrashFiles, removeCrashFilesOf, scrubMinidump, sweepCrashFiles, validUploadUrl, type ScrubNames } from '../src/main/crash-files';
 import { MainErrorCounter, fingerprintOfMainError, mainErrorName } from '../src/main/main-errors';
 import { serverEnv, profilePaths, telemetryOffInEnv } from '../src/main/profile';
 import { normalizeStack } from '../src/server/protocol';
@@ -124,6 +124,31 @@ test.describe('the minidump cap', () => {
     expect(ids(dir)).toEqual(['instance-1', 'before-notes']);
     removeCrashFilesOf(dir, instance, instance);
     expect(ids(dir)).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a server's wipe takes its runs' names out of the run list and keeps their places, so the other runs keep their crash files", () => {
+    const dir = folder();
+    const instance = 'https://mail.example.org';
+    const standalone = 'https://app.bulwark.localhost';
+    const day = 86_400_000;
+    const now = Date.now();
+    noteCrashRun(dir, instance, now - 8 * day);
+    plant(dir, 'instance-1', 10, 7);
+    noteCrashRun(dir, standalone, now - 6 * day);
+    plant(dir, 'standalone-1', 10, 5);
+    noteCrashRun(dir, instance, now - 4 * day);
+    removeCrashFilesOf(dir, instance);
+    const runs = readCrashRuns(dir);
+    expect(runs.map((run) => run.at)).toEqual([now - 8 * day, now - 6 * day, now - 4 * day]);
+    expect(runs.map((run) => run.page)).not.toContain(crashPageOf(instance));
+    expect(runs[1].page).toBe(crashPageOf(standalone));
+    expect(ids(dir)).toEqual(['standalone-1']);
+    // A file of the wiped server's run that its wipe didn't get (still being written then):
+    // the next wipe of any server takes it, and the standalone page's own stays.
+    plant(dir, 'instance-late', 10, 3);
+    removeCrashFilesOf(dir, 'https://other.example');
+    expect(ids(dir)).toEqual(['standalone-1']);
     rmSync(dir, { recursive: true, force: true });
   });
 

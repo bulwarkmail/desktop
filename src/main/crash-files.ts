@@ -136,9 +136,16 @@ export function noteCrashRun(dir: string, origin: string, at = Date.now()): void
 }
 
 /**
+ * The page of a run whose server was wiped: the hash that named the server goes with the wipe,
+ * the run's place stays, so a crash file of the runs around it stays theirs.
+ */
+const WIPED_RUN = 'wiped';
+
+/**
  * The crash files of `origin`'s runs: those written after a run for it started and before the
  * next run did. One from before any run was noted is `legacy`'s: the standalone page's, or the
- * one server the profile ran (wipe-scope.ts `legacyOwner`).
+ * one server the profile ran (wipe-scope.ts `legacyOwner`). One of a wiped server's run, which
+ * that wipe couldn't take, goes with any server's wipe.
  */
 export function crashFilesOf(crashes: readonly CrashFile[], runs: readonly CrashRun[], origin: string, legacy: string = APP_ORIGIN): CrashFile[] {
   const page = crashPageOf(origin);
@@ -146,23 +153,35 @@ export function crashFilesOf(crashes: readonly CrashFile[], runs: readonly Crash
   const ordered = [...runs].sort((a, b) => a.at - b.at);
   return crashes.filter((crash) => {
     const run = ordered.filter((candidate) => candidate.at <= crash.createdAt).at(-1);
-    return (run?.page ?? unnoted) === page;
+    const owner = run?.page ?? unnoted;
+    return owner === page || owner === WIPED_RUN;
   });
 }
 
-/** A server's wipe: its crash files go. Null: all of them, and the run list with them. */
+/**
+ * A server's wipe: its crash files go, and its runs' hashes in the run list. Null: all the
+ * files, and the run list with them.
+ */
 export function removeCrashFilesOf(dir: string, origin: string | null, legacy: string = APP_ORIGIN): void {
   if (origin === null) {
     removeAllCrashFiles(dir);
     rmSync(path.join(dir, RUNS_FILE), { force: true });
     return;
   }
-  for (const crash of crashFilesOf(listCrashFiles(dir), readCrashRuns(dir), origin, legacy)) {
+  const runs = readCrashRuns(dir);
+  for (const crash of crashFilesOf(listCrashFiles(dir), runs, origin, legacy)) {
     try {
       removeCrash(dir, crash);
     } catch (error) {
       console.warn('A crash file could not be removed:', error);
     }
+  }
+  const page = crashPageOf(origin);
+  if (!runs.some((run) => run.page === page)) return;
+  try {
+    writeFileSync(path.join(dir, RUNS_FILE), JSON.stringify(runs.map((run) => (run.page === page ? { page: WIPED_RUN, at: run.at } : run))));
+  } catch (error) {
+    console.warn('The crash files\' run list could not be written:', error);
   }
 }
 
