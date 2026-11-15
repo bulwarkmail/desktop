@@ -27,7 +27,7 @@ import { holdEarlyLaunches } from './features/os-launch';
 import { appUserModelId, electronRegistersScheme } from './features/os-rules';
 import { takeResumeUrl } from './resume-rules';
 import { setToastActivator } from './features/os-toasts';
-import { holdUpdateInstall } from './features/updater';
+import { handOffQuit, holdUpdateInstall, relaunchThroughUpdate } from './features/updater';
 import { addRestartTimers, askToRestart, policies } from './features/policies';
 import { devToolsForcedOff } from './features/dev-tools';
 import { privacy } from './features/privacy';
@@ -803,9 +803,12 @@ async function boot(theme: ThemeController): Promise<void> {
 }
 
 function restartNow(): void {
-  // Installing now would kill the app relaunched here. It's on disk for the next quit.
-  holdUpdateInstall();
-  app.relaunch();
+  // With an update staged on macOS, its own relaunch reopens the app, on the new version.
+  if (!relaunchThroughUpdate('a restart')) {
+    // Installing now would kill the app relaunched here. It's on disk for the next quit.
+    holdUpdateInstall();
+    app.relaunch();
+  }
   // Quitting asks each page to save first (before-quit).
   app.quit();
 }
@@ -931,18 +934,37 @@ function askThenSwitchMode(): void {
     });
 }
 
-function finishSwitch(): void {
-  // Installing now would kill the app relaunched below. It's on disk for the next quit.
-  holdUpdateInstall();
+/** What the next start reads to ask for a connection, however it's started. */
+function saveSwitch(): void {
   stateFile.data.mode = undefined;
   stateFile.data.instanceUrl = undefined;
   stateFile.data.askConnection = true;
   stateFile.data.askConnectionPage = switchPage;
   stateFile.save();
+}
+
+function finishSwitch(): void {
+  switching = false;
+  // Installing now would kill the app relaunched below. It's on disk for the next quit.
+  holdUpdateInstall();
+  saveSwitch();
   app.relaunch();
 }
 
 let quitFlushed = false;
+
+/**
+ * Pages have saved. True: an update staged on macOS takes the quit over and relaunches the app
+ * on the new version. Change Connection goes that way too, since the start ShipIt opens reads
+ * the same flags; not from will-quit, by then Squirrel has the quit.
+ */
+function handOffAfterSave(): boolean {
+  if (switching && relaunchThroughUpdate('Change Connection')) {
+    switching = false;
+    saveSwitch();
+  }
+  return handOffQuit();
+}
 
 function openDeepLink(link: WindowLink): void {
   const windows = windowManager;
@@ -1038,7 +1060,12 @@ if (gotLock) {
       event.preventDefault();
       return;
     }
-    if (quitFlushed || !windowManager) return;
+    if (quitFlushed) return;
+    if (!windowManager) {
+      // Nothing to save: an update's relaunch can take the quit over now.
+      if (handOffAfterSave()) event.preventDefault();
+      return;
+    }
     event.preventDefault();
     quitFlushed = true;
     const windows = windowManager;
@@ -1065,7 +1092,7 @@ if (gotLock) {
         }
       }
       windows.beginQuit();
-      app.quit();
+      if (!handOffAfterSave()) app.quit();
     });
   });
 

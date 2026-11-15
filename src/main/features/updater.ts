@@ -8,15 +8,30 @@
  * update".
  *
  * Both go through the normal quit, so pages save their drafts first (`before-quit` in
- * index.ts), a page that asks to stay calls the restart off, and only then, at
- * `will-quit`, does the installer start. The other way round NSIS would kill the app in
- * the middle of saving.
+ * index.ts) and a page that asks to stay calls the restart off.
+ *
+ * Windows and Linux: only then, at `will-quit`, does the installer start. The other way
+ * round NSIS would kill the app in the middle of saving.
+ *
+ * Signed macOS: electron-updater says "downloaded" before it has handed the zip to
+ * Squirrel.Mac (through a local proxy), and only Squirrel can install it. So the update is
+ * ready only when Electron's own autoUpdater says `update-downloaded`. A plain quit then
+ * lets ShipIt install it, without reopening the app. "Restart to update" waits for pages
+ * to save and then hands the quit to Squirrel (`handOffQuit`, where index.ts would call
+ * `app.quit()`): Squirrel writes its relaunch request and ends the app itself. Asked from
+ * `will-quit`, the app was gone before that request was written, and ShipIt installed
+ * without a relaunch or not at all. A relaunch for something else (a policy, a wipe,
+ * Change Connection) goes the same way while an update is staged (`relaunchThroughUpdate`):
+ * ShipIt installs at the exit whatever electron-updater is told, and drops the update when
+ * the instance `app.relaunch()` started is already running.
+ *
+ * What happens goes to <userData>/logs/updater.log, on every platform.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { app, BrowserWindow, Notification, powerMonitor } from 'electron';
+import { app, autoUpdater as nativeUpdater, BrowserWindow, Notification, powerMonitor } from 'electron';
 import type { AppUpdater, CancellationToken, UpdateInfo } from 'electron-updater';
 import { CHANNEL, type UpdateChannel, type UpdateState } from '../../shared/bridge';
 import { native } from '../native';
@@ -32,10 +47,19 @@ import {
   judgeFeedVersion,
   nothingPublished,
   newestReleaseInFeed,
+  nextReadiness,
+  NOT_READY,
+  quitPath,
+  readyVersion,
+  relaunchPath,
   updateAbility,
+  updaterLogLine,
+  updaterLogNeedsRotation,
   updatePolicyFrom,
   updateUrlAllowed,
   type InstallKind,
+  type QuitPath,
+  type ReadinessEvent,
   type UpdatePolicy,
   type WantedDownload,
 } from '../update-rules';
@@ -85,18 +109,70 @@ function detectKind(): InstallKind {
   });
 }
 
-let testPolicy: UpdatePolicy | null = null;
-let hold: (() => void) | null = null;
+let logFile: string | null = null;
 
-/** The app is restarting for something else (Change Connection): an update waits for the next quit. */
+/** Appends to <userData>/logs/updater.log. Past ~1 MB at start the old one moves aside. */
+function updaterLog(level: string, message: unknown): void {
+  try {
+    if (!logFile) {
+      const dir = path.join(app.getPath('userData'), 'logs');
+      mkdirSync(dir, { recursive: true });
+      logFile = path.join(dir, 'updater.log');
+      try {
+        if (updaterLogNeedsRotation(statSync(logFile).size)) renameSync(logFile, path.join(dir, 'updater.old.log'));
+      } catch {
+        // None yet.
+      }
+    }
+    // Synchronous: the lines that matter most come just before the app goes.
+    appendFileSync(logFile, updaterLogLine(new Date(), level, message));
+  } catch {
+    // A log that can't be written mustn't stop an update.
+  }
+}
+
+const logger = {
+  info: (message?: unknown) => updaterLog('info', message),
+  warn: (message?: unknown) => updaterLog('warn', message),
+  error: (message?: unknown) => updaterLog('error', message),
+  debug: (message: string) => updaterLog('debug', message),
+};
+
+let testPolicy: UpdatePolicy | null = null;
+let active: Updater | null = null;
+
+/** The app is restarting for something else, without the update: it waits for the next quit. */
 export function holdUpdateInstall(): void {
-  hold?.();
+  active?.hold();
+}
+
+/**
+ * The app wants to relaunch for something else (a policy, a wipe, Change Connection). True: an
+ * update is staged on macOS, and its relaunch takes the place of `app.relaunch()`. The caller
+ * quits as usual (or index.ts does, for Change Connection), and `handOffQuit` does the rest.
+ */
+export function relaunchThroughUpdate(reason: string): boolean {
+  return active?.relaunchThroughUpdate(reason) ?? false;
+}
+
+/**
+ * Where index.ts would call `app.quit()` once pages have saved. True: Squirrel has taken the
+ * quit over, and ends the app itself once it has written its relaunch request.
+ */
+export function handOffQuit(): boolean {
+  return active?.handOffQuit() ?? false;
 }
 
 class Updater {
   private updater: AppUpdater | null = null;
   private timer: NodeJS.Timeout | null = null;
   private restarting = false;
+  /** A page chose to stay since the restart was asked for. */
+  private stayed = false;
+  /** Squirrel has the quit: once only. */
+  private handedOff = false;
+  private installing = false;
+  private readiness = NOT_READY;
   private lastCheckAt = 0;
   private readonly kind: InstallKind = detectKind();
   private readonly testFeed: string | undefined = __BULWARK_UPDATER_TEST__ ? argValue('bulwark-test-update-feed') : undefined;
@@ -197,7 +273,7 @@ class Updater {
     if (this.updater) return this.updater;
     const require = createRequire(import.meta.url);
     const { autoUpdater } = require('./updater-lib.cjs') as { autoUpdater: AppUpdater };
-    autoUpdater.logger = null;
+    autoUpdater.logger = logger;
     autoUpdater.autoDownload = false;
     // Only true once a right version is on disk: see `onDownloaded`.
     autoUpdater.autoInstallOnAppQuit = false;
@@ -239,6 +315,16 @@ class Updater {
       return request;
     };
     autoUpdater.on('error', (error: Error) => this.onError(error));
+    if (process.platform === 'darwin') {
+      // electron-updater passes Squirrel's errors on as its own `error`: onError has them.
+      nativeUpdater.on('error', (error: Error) => {
+        updaterLog('error', `Squirrel: ${error.message}`);
+        // Squirrel had the quit and failed: the windows are gone, so the app goes too.
+        if (this.handedOff) app.quit();
+      });
+      nativeUpdater.on('update-downloaded', () => this.onSquirrelDownloaded());
+      nativeUpdater.on('before-quit-for-update', () => updaterLog('info', 'Squirrel: before-quit-for-update'));
+    }
     this.updater = autoUpdater;
     return autoUpdater;
   }
@@ -291,17 +377,45 @@ class Updater {
     // The channel or a policy may have moved while this came down.
     if (!acceptDownload({ allowed: this.allowed, wanted: this.wanted, version: info.version, current: app.getVersion(), channel: this.channel })) {
       updater.autoInstallOnAppQuit = false;
+      this.ready({ type: 'reset' });
       return;
     }
+    // On macOS this is what makes electron-updater hand the zip to Squirrel, right after.
     updater.autoInstallOnAppQuit = true;
-    this.setStatus('ready', info.version);
+    this.ready({ type: 'downloaded', version: info.version });
+    this.announceReady();
+  }
+
+  private ready(event: ReadinessEvent): void {
+    this.readiness = nextReadiness(this.readiness, event);
+  }
+
+  /** Squirrel has it staged: only now can it install on macOS. */
+  private onSquirrelDownloaded(): void {
+    updaterLog('info', `Squirrel: update-downloaded (${this.readiness.downloaded ? `for ${this.readiness.downloaded}` : 'nothing wanted'})`);
+    // Given up on meanwhile.
+    if (!this.readiness.downloaded || this.status === 'ready') return;
+    this.ready({ type: 'squirrel-downloaded' });
+    this.announceReady();
+  }
+
+  /** On macOS the download stays at 100 % until Squirrel has it. */
+  private announceReady(): void {
+    const version = readyVersion(this.kind, this.readiness);
+    if (!version) {
+      updaterLog('info', `${this.readiness.downloaded} downloaded, waiting for Squirrel`);
+      this.setStatus('downloading', this.readiness.downloaded ?? undefined, 100);
+      return;
+    }
+    updaterLog('info', `${version} is ready`);
+    this.setStatus('ready', version);
     const { state } = this.ctx;
-    if (state.data.updateNotified === info.version) return;
-    state.data.updateNotified = info.version;
+    if (state.data.updateNotified === version) return;
+    state.data.updateNotified = version;
     state.touch();
     if (!Notification.isSupported()) return;
     const text = strings();
-    const notification = new Notification({ title: text.updateReadyTitle, body: fill(text.updateReadyBody, { version: info.version }), silent: true });
+    const notification = new Notification({ title: text.updateReadyTitle, body: fill(text.updateReadyBody, { version }), silent: true });
     notification.on('click', () => this.restart());
     notification.show();
   }
@@ -312,6 +426,7 @@ class Updater {
     const token = new Token();
     this.downloadToken = token;
     this.wanted = { version, older };
+    this.ready({ type: 'reset' });
     const run = updater.downloadUpdate(token);
     this.activeDownload = run.then(
       () => {},
@@ -330,6 +445,8 @@ class Updater {
   /** Whatever is coming down or sitting on disk no longer counts. Waits until it has stopped. */
   private async abandonDownload(): Promise<void> {
     this.wanted = null;
+    // Squirrel may still finish it: that doesn't make it ready, and a relaunch doesn't wait for it.
+    this.ready({ type: 'reset' });
     if (this.downloadToken) {
       this.downloadToken.cancel();
       this.downloadToken = null;
@@ -420,8 +537,42 @@ class Updater {
   /** The normal quit. If a page stays, the windows manager says so and this is called off. */
   restart(): void {
     if (this.status !== 'ready' || !this.allowed) return;
+    updaterLog('info', 'Restart to Update');
     this.restarting = true;
+    this.stayed = false;
     app.quit();
+  }
+
+  hold(): void {
+    this.restarting = false;
+    if (this.updater) this.updater.autoInstallOnAppQuit = false;
+  }
+
+  relaunchThroughUpdate(reason: string): boolean {
+    const way = relaunchPath({ kind: this.kind, squirrelReady: this.readiness.squirrelReady });
+    updaterLog('info', `relaunch for ${reason}: ${way === 'update' ? "through the update's relaunch" : 'app.relaunch()'}`);
+    if (way !== 'update') return false;
+    this.restarting = true;
+    this.stayed = false;
+    return true;
+  }
+
+  private quitPath(): QuitPath {
+    return quitPath({ kind: this.kind, restarting: this.restarting && this.allowed, squirrelReady: this.readiness.squirrelReady, stayed: this.stayed });
+  }
+
+  handOffQuit(): boolean {
+    if (this.handedOff) return false;
+    const way = this.quitPath();
+    updaterLog('info', `pages saved, quit: ${way}`);
+    if (way !== 'squirrel') return false;
+    this.handedOff = true;
+    // Out of the quit's own handlers: Squirrel closes the windows, writes its request and ends the app.
+    setImmediate(() => {
+      updaterLog('info', 'handing the quit to Squirrel (quitAndInstall)');
+      this.load().quitAndInstall(false, true);
+    });
+    return true;
   }
 
   openDownload(): void {
@@ -519,18 +670,22 @@ class Updater {
       ctx.state.touch();
     }
 
-    hold = () => {
-      this.restarting = false;
-      if (this.updater) this.updater.autoInstallOnAppQuit = false;
-    };
+    active = this;
 
     // A page chose to stay: the install waits, and the update stays ready.
     ctx.windows.on('stayed', () => {
-      this.restarting = false;
+      this.stayed = true;
     });
     app.on('will-quit', () => {
+      // Signed macOS never installs from here: Squirrel has the quit already, or installs at the exit by itself.
+      if (this.handedOff || this.installing) return;
+      const way = this.quitPath();
+      if (this.readiness.squirrelReady) updaterLog('info', `quitting with ${this.readiness.downloaded} staged: Squirrel installs it, without a relaunch`);
+      if (way !== 'install-at-will-quit' || this.status !== 'ready') return;
+      this.installing = true;
+      updaterLog('info', 'installing at will-quit');
       // Not silent: the app is gone and a person is waiting, so the installer's progress shows.
-      if (this.restarting && this.allowed && this.status === 'ready') this.load().quitAndInstall(false, true);
+      this.load().quitAndInstall(false, true);
     });
 
     setUpdatePolicySource(() => updatePolicyFrom(policies.snapshot));

@@ -166,6 +166,82 @@ export function acceptDownload(facts: { allowed: boolean; wanted: WantedDownload
   return verdict === 'newer' || (wanted.older && verdict === 'older-offer');
 }
 
+/**
+ * What electron-updater and, on macOS, Squirrel.Mac have of an update. On macOS electron-updater
+ * says "downloaded" before it hands the zip to Squirrel, and only Squirrel can install it.
+ */
+export interface UpdateReadiness {
+  /** The version electron-updater finished and `acceptDownload` took. */
+  downloaded: string | null;
+  /** Electron's native autoUpdater said `update-downloaded`: Squirrel has it staged. */
+  squirrelReady: boolean;
+}
+
+export const NOT_READY: UpdateReadiness = { downloaded: null, squirrelReady: false };
+
+export type ReadinessEvent = { type: 'downloaded'; version: string } | { type: 'squirrel-downloaded' } | { type: 'reset' };
+
+/** A download given up on, a channel or policy that moved, a new download: `reset`. */
+export function nextReadiness(readiness: UpdateReadiness, event: ReadinessEvent): UpdateReadiness {
+  if (event.type === 'reset') return NOT_READY;
+  if (event.type === 'downloaded') return { downloaded: event.version, squirrelReady: false };
+  // Squirrel finishing one given up on meanwhile doesn't make anything ready.
+  return readiness.downloaded ? { ...readiness, squirrelReady: true } : readiness;
+}
+
+/** The version "Restart to Update" may offer, if any. Signed macOS waits for Squirrel too. */
+export function readyVersion(kind: InstallKind, readiness: UpdateReadiness): string | null {
+  if (!readiness.downloaded) return null;
+  return kind !== 'mac-signed' || readiness.squirrelReady ? readiness.downloaded : null;
+}
+
+/**
+ * What a quit does about an update. `squirrel`: once pages have saved, Squirrel.Mac takes the
+ * quit over, writes its relaunch request and ends the app itself. `install-at-will-quit`: the
+ * installer starts at `will-quit` (NSIS, AppImage). `plain`: nothing of the updater's; on macOS
+ * a staged update still installs, without reopening the app.
+ */
+export type QuitPath = 'squirrel' | 'install-at-will-quit' | 'plain';
+
+export function quitPath(facts: { kind: InstallKind; restarting: boolean; squirrelReady: boolean; stayed: boolean }): QuitPath {
+  const { kind, restarting, squirrelReady, stayed } = facts;
+  if (!restarting || stayed) return 'plain';
+  if (kind === 'mac-signed') return squirrelReady ? 'squirrel' : 'plain';
+  return 'install-at-will-quit';
+}
+
+/**
+ * How the app relaunches for something else (a policy, a wipe, Change Connection). With an update
+ * staged, Squirrel installs it at the exit whatever electron-updater is told, and finds the
+ * instance `app.relaunch()` started still running: it drops the update. Its own relaunch doesn't.
+ */
+export function relaunchPath(facts: { kind: InstallKind; squirrelReady: boolean }): 'update' | 'relaunch' {
+  return facts.kind === 'mac-signed' && facts.squirrelReady ? 'update' : 'relaunch';
+}
+
+/** Past this at start, updater.log becomes updater.old.log. */
+export const UPDATER_LOG_LIMIT = 1024 * 1024;
+
+export function updaterLogNeedsRotation(size: number): boolean {
+  return size > UPDATER_LOG_LIMIT;
+}
+
+/**
+ * One line of updater.log: a timestamp, the level, the message. No credentials (the local
+ * proxy's Basic authorization, any token), none of the headers electron-updater puts in an HTTP
+ * error, and not the proxy's random file name.
+ */
+export function updaterLogLine(time: Date, level: string, message: unknown): string {
+  let text = message instanceof Error ? message.stack ?? `${message.name}: ${message.message}` : typeof message === 'string' ? message : JSON.stringify(message) ?? String(message);
+  text = text
+    .replace(/Headers: \{[\s\S]*?\n\}/g, 'Headers: [left out]')
+    .replace(/(authorization["']?\s*[:=]\s*["']?)[^"'\r\n,}]+/gi, '$1[left out]')
+    .replace(/\b(Basic|Bearer|token)\s+[A-Za-z0-9+/=._~-]{8,}/gi, '$1 [left out]')
+    .replace(/([?&](?:access_)?token=)[^&\s"']+/gi, '$1[left out]')
+    .replace(/\b[0-9a-f]{32,}\b/gi, '[random]');
+  return `${time.toISOString()} ${level.toUpperCase()} ${text.replace(/\r?\n/g, '\n    ')}\n`;
+}
+
 /** The hosts update traffic may reach, on every hop. A test build adds its own feed. */
 export function updateUrlAllowed(url: string, testOrigin?: string): boolean {
   let parsed: URL;

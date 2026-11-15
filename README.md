@@ -82,6 +82,8 @@ What a copy does depends on how it got there:
 | macOS, unsigned | Says a version exists, with a link. Squirrel.Mac refuses unsigned apps. |
 | macOS, signed | Replaces itself |
 
+On signed macOS the update counts as ready only once Squirrel.Mac has it staged. "Restart to Update", and a restart for a policy, a wipe or Change Connection while an update is staged, let pages save and then leave the quit to Squirrel, which installs the update and reopens the app on the new version. The updater writes what it does to `logs/updater.log` in the profile folder, on every platform. A log over about 1 MB moves to `updater.old.log` at the next start.
+
 **Channels.** Stable, or beta for prereleases. Going to beta asks first. Going back to stable with a beta running does nothing by itself: the app stays on the beta until stable catches up. The settings page offers "Install older version…", which asks first and says what it can cost, and nothing older downloads without that yes. A download under way when the channel or a policy changes is given up. Stable never takes a prerelease. A copy stays on the channel it started on until someone chooses, also after it reaches a stable version. Beta reads the releases feed itself and takes the highest version, so a stable hotfix can't hide a newer beta, and it works while no stable release exists at all.
 
 **Tests.** `node scripts/build-update-fixtures.mjs` builds three real installers with the test switches compiled in. `npx playwright test test/updater.spec.ts` installs them on this machine and runs electron-updater's real GitHub provider against a local stand-in. A normal build has no way to set another feed: `test/updater-rules.spec.ts` checks the string isn't there.
