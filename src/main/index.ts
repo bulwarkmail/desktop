@@ -1085,9 +1085,8 @@ if (gotLock) {
         };
         const { response: choice } = await showMessageBox(parent ?? null, options);
         if (choice !== 0) {
-          quitFlushed = false;
-          switching = false;
-          windows.cancelQuit();
+          // As a page's own Stay: the quit, a switch and a restart for an update are called off.
+          windows.emit('stayed');
           return;
         }
       }

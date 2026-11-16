@@ -370,6 +370,8 @@ test.describe('a relaunch for something else', () => {
     expect(index).toMatch(/if \(!relaunchThroughUpdate\([^)]*\)\) \{[^}]*?holdUpdateInstall\(\);\s*app\.relaunch\(\);/);
     expect(index).toMatch(/windows\.beginQuit\(\);[\s\S]{0,400}if \(!handOffAfterSave\(\)\) app\.quit\(\);/);
     expect(index).toMatch(/function handOffAfterSave\(\)[\s\S]{0,300}return handOffQuit\(\);/);
+    // Stay in the shell's own unsaved question calls the update's restart off too, or the next plain quit would relaunch.
+    expect(index).toMatch(/if \(choice !== 0\) \{[^}]*?windows\.emit\('stayed'\);\s*return;/);
     const updater = readFileSync(path.join(ROOT, 'src', 'main', 'features', 'updater.ts'), 'utf8');
     expect(updater).not.toMatch(/autoUpdater\.logger = null/);
   });
