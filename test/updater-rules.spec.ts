@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { createRequire } from 'node:module';
-import { acceptDownload, compareVersions, differentialDownloads, effectiveChannel, installKind, installerSignatureCheck, isPrerelease, judgeFeedVersion, newestReleaseInFeed, nothingPublished, parseDn, signatureVerdict, updateAbility, updatePolicyFrom, updateUrlAllowed } from '../src/main/update-rules';
+import { acceptDownload, compareVersions, differentialDownloads, effectiveChannel, installKind, installerSignatureCheck, isPrerelease, judgeFeedVersion, newestReleaseInFeed, nextReadiness, NOT_READY, nothingPublished, parseDn, quitPath, readyVersion, relaunchPath, signatureVerdict, updateAbility, UPDATER_LOG_LIMIT, updaterLogLine, updaterLogNeedsRotation, updatePolicyFrom, updateUrlAllowed } from '../src/main/update-rules';
 import { sandboxRefused } from '../src/main/sandbox-check';
 import { LABEL_KEY } from '../src/main/label-keys';
 import { notifyUpdatePolicyChanged, onUpdatePolicyChange, readUpdatePolicy, setUpdatePolicySource } from '../src/main/update-policy';
@@ -306,5 +306,104 @@ test.describe('the normal build', () => {
     expect(main).not.toContain('bulwark-test-update-policy');
     expect(main).not.toContain('__bulwarkUpdaterTest');
     expect(main).not.toContain('bulwark-test-update-feed');
+  });
+});
+
+test.describe('when an update is ready on macOS', () => {
+  test('signed macOS waits for Squirrel, the others only for the download', () => {
+    const downloaded = nextReadiness(NOT_READY, { type: 'downloaded', version: '1.1.0' });
+    expect(readyVersion('mac-signed', NOT_READY)).toBeNull();
+    expect(readyVersion('mac-signed', downloaded)).toBeNull();
+    expect(readyVersion('nsis', downloaded)).toBe('1.1.0');
+    expect(readyVersion('appimage', downloaded)).toBe('1.1.0');
+    const staged = nextReadiness(downloaded, { type: 'squirrel-downloaded' });
+    expect(staged.squirrelReady).toBe(true);
+    expect(readyVersion('mac-signed', staged)).toBe('1.1.0');
+  });
+
+  test('a download given up on, a channel that moved or a new download start over', () => {
+    const staged = nextReadiness(nextReadiness(NOT_READY, { type: 'downloaded', version: '1.1.0' }), { type: 'squirrel-downloaded' });
+    const reset = nextReadiness(staged, { type: 'reset' });
+    expect(reset).toEqual(NOT_READY);
+    expect(readyVersion('mac-signed', reset)).toBeNull();
+    // Squirrel finishing the one given up on doesn't bring it back.
+    expect(nextReadiness(reset, { type: 'squirrel-downloaded' })).toEqual(NOT_READY);
+    // electron-updater's next download waits for Squirrel again.
+    const next = nextReadiness(staged, { type: 'downloaded', version: '1.2.0' });
+    expect(next).toEqual({ downloaded: '1.2.0', squirrelReady: false });
+    expect(readyVersion('mac-signed', next)).toBeNull();
+  });
+});
+
+test.describe('which way the app quits', () => {
+  const facts = { restarting: true, squirrelReady: true, stayed: false };
+
+  test('Restart to Update on signed macOS hands the quit to Squirrel', () => {
+    expect(quitPath({ ...facts, kind: 'mac-signed' })).toBe('squirrel');
+  });
+
+  test('a plain quit or a page that stayed leaves it to Squirrel, without a relaunch', () => {
+    expect(quitPath({ ...facts, kind: 'mac-signed', restarting: false })).toBe('plain');
+    expect(quitPath({ ...facts, kind: 'mac-signed', stayed: true })).toBe('plain');
+    expect(quitPath({ ...facts, kind: 'mac-signed', squirrelReady: false })).toBe('plain');
+  });
+
+  test('NSIS and AppImage still install at will-quit', () => {
+    expect(quitPath({ ...facts, kind: 'nsis', squirrelReady: false })).toBe('install-at-will-quit');
+    expect(quitPath({ ...facts, kind: 'appimage', squirrelReady: false })).toBe('install-at-will-quit');
+    expect(quitPath({ ...facts, kind: 'nsis', restarting: false })).toBe('plain');
+    expect(quitPath({ ...facts, kind: 'nsis', stayed: true })).toBe('plain');
+  });
+});
+
+test.describe('a relaunch for something else', () => {
+  test('goes through the update only on signed macOS with one staged', () => {
+    expect(relaunchPath({ kind: 'mac-signed', squirrelReady: true })).toBe('update');
+    expect(relaunchPath({ kind: 'mac-signed', squirrelReady: false })).toBe('relaunch');
+    expect(relaunchPath({ kind: 'mac-unsigned', squirrelReady: true })).toBe('relaunch');
+    expect(relaunchPath({ kind: 'nsis', squirrelReady: true })).toBe('relaunch');
+    expect(relaunchPath({ kind: 'appimage', squirrelReady: false })).toBe('relaunch');
+  });
+
+  test('index.ts asks the updater before app.relaunch and hands the quit over after the save', () => {
+    const index = readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8');
+    expect(index).toMatch(/if \(!relaunchThroughUpdate\([^)]*\)\) \{[^}]*?holdUpdateInstall\(\);\s*app\.relaunch\(\);/);
+    expect(index).toMatch(/windows\.beginQuit\(\);[\s\S]{0,400}if \(!handOffAfterSave\(\)\) app\.quit\(\);/);
+    expect(index).toMatch(/function handOffAfterSave\(\)[\s\S]{0,300}return handOffQuit\(\);/);
+    const updater = readFileSync(path.join(ROOT, 'src', 'main', 'features', 'updater.ts'), 'utf8');
+    expect(updater).not.toMatch(/autoUpdater\.logger = null/);
+  });
+});
+
+test.describe('the updater log', () => {
+  test('rotates past about 1 MB', () => {
+    expect(updaterLogNeedsRotation(0)).toBe(false);
+    expect(updaterLogNeedsRotation(UPDATER_LOG_LIMIT)).toBe(false);
+    expect(updaterLogNeedsRotation(UPDATER_LOG_LIMIT + 1)).toBe(true);
+    expect(UPDATER_LOG_LIMIT).toBe(1024 * 1024);
+  });
+
+  test('has a timestamp on each line and no secrets', () => {
+    const time = new Date('2026-11-15T10:00:00.000Z');
+    expect(updaterLogLine(time, 'info', 'Checking for update')).toBe('2026-11-15T10:00:00.000Z INFO Checking for update\n');
+    const file = 'a'.repeat(32) + '0123456789abcdef'.repeat(6);
+    const line = updaterLogLine(time, 'warn', [
+      `/${file}.zip requested by Squirrel.Mac`,
+      'Authorization: Basic dXNlcjpwYXNzd29yZA==',
+      'url: https://example.test/x?token=abcdef123&b=1',
+      'Bearer abcdefghijklmnop',
+      '404 Not Found',
+      'Headers: {',
+      '  "set-cookie": "session=secret"',
+      '}',
+    ].join('\n'));
+    expect(line.startsWith('2026-11-15T10:00:00.000Z WARN ')).toBe(true);
+    expect(line.endsWith('\n')).toBe(true);
+    expect(line.slice(0, -1)).not.toMatch(/\n(?! {4})/);
+    for (const secret of [file, 'dXNlcjpwYXNzd29yZA==', 'abcdef123', 'abcdefghijklmnop', 'session=secret']) expect(line).not.toContain(secret);
+    expect(line).toContain('404 Not Found');
+    expect(line).toContain('requested by Squirrel.Mac');
+    const error = updaterLogLine(time, 'error', new Error('App Still Running Error'));
+    expect(error).toContain('ERROR Error: App Still Running Error');
   });
 });
