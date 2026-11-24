@@ -8,12 +8,13 @@
  * instance mode the SSO redirect chain, which has to run in the window so the
  * instance's own cookies come back with it. A plugin's sign-in, which the webmail
  * asks for through the bridge, runs in a window of its own on the same session for the
- * same reason (openSignInWindow).
+ * same reason (openSignInWindow). So does a sign-in pop-up of an app framed in the page, such
+ * as an inline sidebar app (isFramedAppSignIn): its cookie has to land where the frame reads it.
  */
 
 import { BrowserWindow, screen, shell, type BrowserWindowConstructorOptions, type WebContents, type WebPreferences } from 'electron';
 import type { Mode } from '../shared/bridge';
-import { FORCED_SSO_LIMIT_MS, SsoChain, UNCLICKED_OPEN_MS, externalOpenAllowed, isJmapProxyPath, isSsoStart, looksLikeProviderLogout, parse, sameOrigin } from './navigation-rules';
+import { FORCED_SSO_LIMIT_MS, SsoChain, UNCLICKED_OPEN_MS, externalOpenAllowed, isFramedAppSignIn, isJmapProxyPath, isSsoStart, looksLikeProviderLogout, opensWithoutOpener, parse, sameOrigin } from './navigation-rules';
 import { adoptDialogSurface, dialogSurfaceOptions, isDialogFrameName } from './dialog-surfaces';
 import { printPreviews } from './features/print';
 import { isPrintFrameName } from './print-rules';
@@ -94,8 +95,21 @@ function bareWindowOptions(preferences: WebPreferences): BrowserWindowConstructo
   };
 }
 
+/** The origins of the frames in a page other than the page's own: inline apps and other embedded pages. */
+function framedOrigins(contents: WebContents, origin: string): string[] {
+  const out = new Set<string>();
+  try {
+    for (const frame of contents.mainFrame.framesInSubtree) {
+      if (frame.parent && frame.origin !== origin) out.add(frame.origin);
+    }
+  } catch {
+    // The page went away meanwhile.
+  }
+  return [...out];
+}
+
 function handleWindowOpen(contents: WebContents, options: GuardOptions) {
-  contents.setWindowOpenHandler(({ url, frameName }) => {
+  contents.setWindowOpenHandler(({ url, frameName, features }) => {
     const windows = options.windows();
     // One of the page's dialogs, drawn into a window of its own (dialog-surfaces.ts).
     if (isDialogFrameName(frameName, url)) {
@@ -131,6 +145,15 @@ function handleWindowOpen(contents: WebContents, options: GuardOptions) {
       windows.open({ type, key, url });
       return { action: 'deny' };
     }
+    // A framed app's sign-in: made hidden, and shown once did-create-window has seen that the
+    // frame that asked for it is that app's (the handler isn't told which frame asked).
+    if (
+      options.mode === 'instance' &&
+      !opensWithoutOpener(features) &&
+      framedOrigins(contents, options.origin).some((framed) => isFramedAppSignIn(parsed, framed, options.origin))
+    ) {
+      return { action: 'allow', overrideBrowserWindowOptions: { ...bareWindowOptions(windows.webPreferences()), show: false } };
+    }
     // A link the user clicked is a click main saw; a script's window.open isn't.
     openExternally(url, contents, options.origin);
     return { action: 'deny' };
@@ -156,6 +179,20 @@ function handleWindowOpen(contents: WebContents, options: GuardOptions) {
     if (previews && isPrintFrameName(details.frameName) && (details.url === 'about:blank' || details.url === '')) {
       previews.adoptPopup(child, contents, details.frameName);
       guardContents(child.webContents, options);
+      return;
+    }
+    if (parsed?.protocol === 'https:') {
+      // Only a framed app's sign-in comes this far. A pop-up of the page itself, or of another
+      // frame, goes to the browser after all.
+      const opener = child.webContents.opener;
+      if (options.mode !== 'instance' || !opener?.parent || !isFramedAppSignIn(parsed, opener.origin, options.origin)) {
+        child.destroy();
+        openExternally(details.url, contents, options.origin);
+        return;
+      }
+      child.setBounds(fitInto(child.getBounds(), screen.getDisplayMatching(child.getBounds()).workArea));
+      guardContents(child.webContents, options, true);
+      child.show();
       return;
     }
     // about:blank and blob: stay outside the manager, under the same guards, and on a screen.

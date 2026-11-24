@@ -45,6 +45,30 @@ export function isPluginSignIn(url: URL, origin: string): boolean {
   return !!target && target.origin === origin && PLUGIN_CALLBACK_PATH.test(target.pathname);
 }
 
+/**
+ * A sign-in pop-up of an app framed in the page, such as an inline sidebar app: `opener` is the
+ * origin of the frame that asked for it, an https origin other than the app's, and the pop-up goes
+ * to that origin or to an authorize request whose one `redirect_uri` comes back to it. It runs in a
+ * window of the app on the same session, so the frame finds the session cookie afterwards. A link
+ * from the frame to anywhere else still goes to the browser.
+ */
+export function isFramedAppSignIn(url: URL, opener: string | null | undefined, origin: string): boolean {
+  if (!opener || opener === origin || url.protocol !== 'https:' || url.username || url.password) return false;
+  const from = parse(opener);
+  if (!from || from.protocol !== 'https:' || from.origin !== opener) return false;
+  if (url.origin === opener) return true;
+  const redirects = url.searchParams.getAll('redirect_uri');
+  return redirects.length === 1 && parse(redirects[0])?.origin === opener;
+}
+
+/** window.open without an opener can't hand a sign-in back: that's a link, for the browser. */
+export function opensWithoutOpener(features: string): boolean {
+  return features
+    .split(',')
+    .map((feature) => feature.split('=')[0].trim().toLowerCase())
+    .some((name) => name === 'noopener' || name === 'noreferrer');
+}
+
 /** How long a single sign-in may stay away from the origin, when a policy forces it. */
 export const FORCED_SSO_LIMIT_MS = 10 * 60_000;
 
